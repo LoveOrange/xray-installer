@@ -1,0 +1,82 @@
+{
+    "log": {
+        "loglevel": "warning",
+        "access": "{{LOG_DIR}}/access.log",
+        "error": "{{LOG_DIR}}/error.log"
+    },
+    "dns": {
+        "servers": [
+            "https+local://1.1.1.1/dns-query",
+            "localhost"
+        ]
+    },
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+            {
+                "type": "field",
+                "ip": ["geoip:private"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "ip": ["geoip:cn"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "domain": ["geosite:category-ads-all"],
+                "outboundTag": "block"
+            }
+        ]
+    },
+    "inbounds": [
+        {
+            "port": 443,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "{{UUID}}",
+                        "flow": "xtls-rprx-vision",
+                        "level": 0,
+                        "email": "{{EMAIL}}"
+                    }
+                ],
+                "decryption": "none",
+                "fallbacks": [
+                    {
+                        "dest": 8080
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {
+                    "alpn": ["http/1.1"],
+                    "certificates": [
+                        {
+                            "certificateFile": "{{CERTS_DIR}}/xray.crt",
+                            "keyFile": "{{CERTS_DIR}}/xray.key"
+                        }
+                    ]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"]
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "tag": "direct",
+            "protocol": "freedom"
+        },
+        {
+            "tag": "block",
+            "protocol": "blackhole"
+        }
+    ]
+}

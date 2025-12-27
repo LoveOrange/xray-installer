@@ -1,0 +1,100 @@
+{
+    "log": {
+        "loglevel": "warning",
+        "access": "{{LOG_DIR}}/access.log",
+        "error": "{{LOG_DIR}}/error.log"
+    },
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+            {
+                "type": "field",
+                "ip": ["geoip:private"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "ip": ["geoip:cn"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "domain": ["geosite:category-ads-all"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "domain": [
+                    "geosite:openai",
+                    "geosite:netflix",
+                    "geosite:disney",
+                    "domain:chat.openai.com",
+                    "domain:openai.com",
+                    "domain:netflix.com",
+                    "domain:disney.com",
+                    "domain:disneyplus.com"
+                ],
+                "outboundTag": "warp"
+            }
+        ]
+    },
+    "inbounds": [
+        {
+            "listen": "0.0.0.0",
+            "port": 443,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "{{UUID}}",
+                        "flow": "xtls-rprx-vision"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": false,
+                    "dest": "{{REALITY_DEST}}",
+                    "xver": 0,
+                    "serverNames": {{REALITY_SERVER_NAMES}},
+                    "privateKey": "{{PRIVATE_KEY}}",
+                    "shortIds": ["{{SHORT_ID}}", ""]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"]
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "tag": "direct",
+            "protocol": "freedom"
+        },
+        {
+            "tag": "warp",
+            "protocol": "wireguard",
+            "settings": {
+                "secretKey": "{{WARP_PRIVATE_KEY}}",
+                "address": ["172.16.0.2/32", "2606:4700:110:8a36:df92:102a:9602:fa18/128"],
+                "peers": [
+                    {
+                        "publicKey": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                        "allowedIPs": ["0.0.0.0/0", "::/0"],
+                        "endpoint": "engage.cloudflareclient.com:2408"
+                    }
+                ],
+                "reserved": [0, 0, 0],
+                "mtu": 1280
+            }
+        },
+        {
+            "tag": "block",
+            "protocol": "blackhole"
+        }
+    ]
+}
