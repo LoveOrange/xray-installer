@@ -429,7 +429,12 @@ step_install_packages() {
 step_create_user() {
     log_step "Setting up user '${XRAY_USER}'..."
     
-    if ! id "$XRAY_USER" &>/dev/null; then
+    local user_exists=false
+    
+    if id "$XRAY_USER" &>/dev/null; then
+        user_exists=true
+        log_info "User '${XRAY_USER}' already exists."
+    else
         # Create user with home directory and bash shell
         useradd -m -s /bin/bash "$XRAY_USER"
         log_info "User '${XRAY_USER}' created."
@@ -439,28 +444,44 @@ step_create_user() {
     usermod -aG sudo "$XRAY_USER"
     log_info "User '${XRAY_USER}' added to sudo group."
     
-    # Setup password
-    log_info "Please set password for user '${XRAY_USER}':"
+    # Ask if user wants to set password
     echo ""
+    if [[ "$user_exists" == "true" ]]; then
+        read -p "Do you want to change password for user '${XRAY_USER}'? [y/N]: " set_passwd
+    else
+        read -p "Do you want to set a password for user '${XRAY_USER}'? [Y/n]: " set_passwd
+        # Default to yes for new users
+        set_passwd="${set_passwd:-y}"
+    fi
     
-    while true; do
-        read -s -p "Enter password: " pass1
+    if [[ "${set_passwd,,}" == "y" ]]; then
         echo ""
-        read -s -p "Confirm password: " pass2
-        echo ""
+        log_info "Please set password for user '${XRAY_USER}':"
         
-        if [[ "$pass1" == "$pass2" ]]; then
-            if [[ -n "$pass1" ]]; then
-                echo "${XRAY_USER}:${pass1}" | chpasswd
-                log_success "Password set successfully."
-                break
+        while true; do
+            read -s -p "Enter password: " pass1
+            echo ""
+            read -s -p "Confirm password: " pass2
+            echo ""
+            
+            if [[ "$pass1" == "$pass2" ]]; then
+                if [[ -n "$pass1" ]]; then
+                    echo "${XRAY_USER}:${pass1}" | chpasswd
+                    log_success "Password set successfully."
+                    break
+                else
+                    log_error "Password cannot be empty!"
+                fi
             else
-                log_error "Password cannot be empty!"
+                log_error "Passwords do not match! Please try again."
             fi
-        else
-            log_error "Passwords do not match! Please try again."
+        done
+    else
+        log_info "Skipping password setup."
+        if [[ "$user_exists" == "false" ]]; then
+            log_warn "User '${XRAY_USER}' has no password. Use SSH key or set password later with: sudo passwd ${XRAY_USER}"
         fi
-    done
+    fi
     
     # Create required directories
     sudo -u "$XRAY_USER" mkdir -p "${CERTS_DIR}"
