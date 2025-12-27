@@ -514,12 +514,16 @@ step_install_acme() {
     log_step "Installing acme.sh..."
     
     # Install as the xray user
+    # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
     sudo -u "$XRAY_USER" -H bash << EOF
 cd ~
 curl https://get.acme.sh | sh -s email=${EMAIL}
+
+# Set default CA to Let's Encrypt (acme.sh defaults to ZeroSSL which requires extra steps)
+~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 EOF
     
-    log_success "acme.sh installed."
+    log_success "acme.sh installed with Let's Encrypt as default CA."
 }
 
 step_request_certificate() {
@@ -533,13 +537,61 @@ step_request_certificate() {
     # Stop nginx temporarily for standalone mode
     systemctl stop nginx 2>/dev/null || true
     
-    # Request certificate
+    # Make sure port 80 is free
+    if lsof -i :80 >/dev/null 2>&1; then
+        log_warn "Port 80 is in use. Attempting to free it..."
+        fuser -k 80/tcp 2>/dev/null || true
+        sleep 2
+    fi
+    
+    # First, test with Let's Encrypt staging server to avoid rate limits
+    # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
+    log_info "Testing certificate issuance (staging)..."
+    
     sudo -u "$XRAY_USER" -H bash << EOF
 export HOME="${XRAY_HOME}"
-~/.acme.sh/acme.sh --issue -d ${DOMAIN} --standalone --keylength ec-256
+~/.acme.sh/acme.sh --issue \
+    --server letsencrypt_test \
+    -d ${DOMAIN} \
+    --standalone \
+    --keylength ec-256 \
+    --force
 EOF
     
-    # Install certificate
+    if [[ $? -ne 0 ]]; then
+        log_error "Certificate test failed! Please check:"
+        echo "  1. Domain DNS points to this server"
+        echo "  2. Port 80 is accessible from internet"
+        echo "  3. No firewall blocking port 80"
+        systemctl start nginx 2>/dev/null || true
+        exit 1
+    fi
+    
+    log_success "Test certificate issued successfully!"
+    log_info "Now requesting real certificate from Let's Encrypt..."
+    
+    # Request real certificate
+    sudo -u "$XRAY_USER" -H bash << EOF
+export HOME="${XRAY_HOME}"
+~/.acme.sh/acme.sh --issue \
+    --server letsencrypt \
+    -d ${DOMAIN} \
+    --standalone \
+    --keylength ec-256 \
+    --force
+EOF
+    
+    if [[ $? -ne 0 ]]; then
+        log_error "Certificate issuance failed!"
+        systemctl start nginx 2>/dev/null || true
+        exit 1
+    fi
+    
+    log_success "Certificate issued successfully!"
+    
+    # Install certificate to our directory
+    log_info "Installing certificate to ${CERTS_DIR}..."
+    
     sudo -u "$XRAY_USER" -H bash << EOF
 export HOME="${XRAY_HOME}"
 ~/.acme.sh/acme.sh --install-cert -d ${DOMAIN} --ecc \
@@ -550,6 +602,10 @@ EOF
     # Set proper permissions
     chmod 644 "${CERTS_DIR}/xray.crt"
     chmod 644 "${CERTS_DIR}/xray.key"
+    
+    # Show certificate info
+    log_info "Certificate details:"
+    openssl x509 -in "${CERTS_DIR}/xray.crt" -noout -subject -dates
     
     log_success "SSL certificate installed to ${CERTS_DIR}"
     
@@ -562,22 +618,24 @@ setup_cert_renewal() {
     
     # Create certificate renewal script
     # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
-    cat > "${CERTS_DIR}/xray-cert-renew.sh" << EOF
+    cat > "${CERTS_DIR}/xray-cert-renew.sh" << 'RENEW_SCRIPT'
 #!/bin/bash
 #===============================================================================
 # Certificate Renewal Script
 # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
-# Created: $(date)
 #===============================================================================
 
+RENEW_SCRIPT
+
+    cat >> "${CERTS_DIR}/xray-cert-renew.sh" << EOF
 DOMAIN="${DOMAIN}"
 XRAY_HOME="${XRAY_HOME}"
 CERTS_DIR="${CERTS_DIR}"
 
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Starting certificate renewal for \${DOMAIN}..."
 
-# Renew certificate
-"\${XRAY_HOME}/.acme.sh/acme.sh" --renew -d "\${DOMAIN}" --ecc --force
+# Renew certificate using Let's Encrypt
+"\${XRAY_HOME}/.acme.sh/acme.sh" --renew -d "\${DOMAIN}" --ecc --force --server letsencrypt
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Certificate renewed."
 
 # Install certificate
@@ -595,6 +653,9 @@ sudo systemctl restart xray
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Xray restarted."
 
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Certificate renewal completed!"
+
+# Show new certificate info
+openssl x509 -in "\${CERTS_DIR}/xray.crt" -noout -dates
 EOF
     
     # Make script executable and set ownership
