@@ -657,24 +657,6 @@ step_request_certificate() {
     # Setup certificate auto-renewal
     setup_cert_renewal
 }
-~/.acme.sh/acme.sh --install-cert -d ${DOMAIN} --ecc \
-    --fullchain-file ${CERTS_DIR}/xray.crt \
-    --key-file ${CERTS_DIR}/xray.key
-EOF
-    
-    # Set proper permissions
-    chmod 644 "${CERTS_DIR}/xray.crt"
-    chmod 644 "${CERTS_DIR}/xray.key"
-    
-    # Show certificate info
-    log_info "Certificate details:"
-    openssl x509 -in "${CERTS_DIR}/xray.crt" -noout -subject -dates
-    
-    log_success "SSL certificate installed to ${CERTS_DIR}"
-    
-    # Setup certificate auto-renewal
-    setup_cert_renewal
-}
 
 setup_cert_renewal() {
     log_info "Setting up automatic certificate renewal..."
