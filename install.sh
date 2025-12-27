@@ -555,15 +555,72 @@ step_request_certificate() {
     
     log_step "Requesting SSL certificate for ${DOMAIN}..."
     
-    # Stop nginx temporarily for standalone mode
-    systemctl stop nginx 2>/dev/null || true
+    # Check if port 80 is accessible
+    log_info "Checking port 80 availability..."
     
-    # Make sure port 80 is free
+    # Stop services that might use port 80
+    systemctl stop nginx 2>/dev/null || true
+    systemctl stop apache2 2>/dev/null || true
+    systemctl stop httpd 2>/dev/null || true
+    
+    sleep 2
+    
+    # Kill any remaining processes on port 80
     if lsof -i :80 >/dev/null 2>&1; then
-        log_warn "Port 80 is in use. Attempting to free it..."
+        log_warn "Port 80 is still in use. Killing processes..."
         fuser -k 80/tcp 2>/dev/null || true
         sleep 2
     fi
+    
+    # Check firewall
+    log_info "Checking firewall settings..."
+    
+    # UFW
+    if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+        log_info "UFW is active. Ensuring port 80 is allowed..."
+        ufw allow 80/tcp >/dev/null 2>&1
+        ufw allow 443/tcp >/dev/null 2>&1
+    fi
+    
+    # iptables - check if port 80 is blocked
+    if command -v iptables &>/dev/null; then
+        # Add rule to allow port 80 if not exists
+        iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
+            iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+        iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || \
+            iptables -I INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+    fi
+    
+    # firewalld
+    if command -v firewall-cmd &>/dev/null && systemctl is-active firewalld &>/dev/null; then
+        log_info "firewalld is active. Ensuring ports 80/443 are allowed..."
+        firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1
+        firewall-cmd --permanent --add-port=443/tcp >/dev/null 2>&1
+        firewall-cmd --reload >/dev/null 2>&1
+    fi
+    
+    # Verify port 80 is now free
+    if lsof -i :80 >/dev/null 2>&1; then
+        log_error "Port 80 is still occupied!"
+        echo ""
+        echo "Processes using port 80:"
+        lsof -i :80
+        echo ""
+        echo "Please free port 80 and try again."
+        exit 1
+    fi
+    
+    log_success "Port 80 is available."
+    
+    # Test connectivity to port 80 from outside (optional check)
+    log_info "Note: Ensure your cloud provider/VPS firewall allows inbound port 80"
+    echo ""
+    echo -e "${YELLOW}Common issues if certificate fails:${NC}"
+    echo "  1. Cloud provider firewall (AWS Security Group, GCP Firewall, etc.)"
+    echo "  2. VPS control panel firewall"
+    echo "  3. Port 80 not forwarded (if behind NAT)"
+    echo ""
+    read -p "Press Enter to continue with certificate request..."
     
     # First, test with Let's Encrypt staging server to avoid rate limits
     # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
@@ -576,15 +633,42 @@ export HOME="${XRAY_HOME}"
     -d ${DOMAIN} \
     --standalone \
     --keylength ec-256 \
-    --force
+    --force \
+    --debug
 EOF
     
     if [[ $? -ne 0 ]]; then
-        log_error "Certificate test failed! Please check:"
-        echo "  1. Domain DNS points to this server"
-        echo "  2. Port 80 is accessible from internet"
-        echo "  3. No firewall blocking port 80"
-        systemctl start nginx 2>/dev/null || true
+        echo ""
+        log_error "Certificate test failed!"
+        echo ""
+        echo -e "${YELLOW}Troubleshooting steps:${NC}"
+        echo ""
+        echo "1. Check if port 80 is accessible from internet:"
+        echo "   From another machine, run: curl -v http://${DOMAIN}"
+        echo ""
+        echo "2. Check cloud provider firewall:"
+        echo "   - AWS: Security Groups → Inbound Rules → Allow TCP 80"
+        echo "   - GCP: VPC Firewall → Allow tcp:80"
+        echo "   - Azure: NSG → Inbound security rules → Allow 80"
+        echo ""
+        echo "3. Check local firewall:"
+        echo "   - UFW: sudo ufw status"
+        echo "   - iptables: sudo iptables -L -n | grep 80"
+        echo ""
+        echo "4. Test port 80 locally:"
+        echo "   sudo nc -l -p 80 &"
+        echo "   curl http://localhost"
+        echo ""
+        echo "5. Check DNS again:"
+        echo "   dig ${DOMAIN} +short"
+        echo ""
+        
+        read -p "Do you want to retry? [y/N]: " retry
+        if [[ "${retry,,}" == "y" ]]; then
+            step_request_certificate
+            return $?
+        fi
+        
         exit 1
     fi
     
@@ -604,7 +688,6 @@ EOF
     
     if [[ $? -ne 0 ]]; then
         log_error "Certificate issuance failed!"
-        systemctl start nginx 2>/dev/null || true
         exit 1
     fi
     
