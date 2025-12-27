@@ -262,31 +262,15 @@ interactive_setup() {
     
     echo ""
     
-    # Only ask about camouflage website in TLS mode
-    # In REALITY mode, the "dest" setting handles all fallback
+    # TLS mode uses Hacker News as camouflage (simplified for automatic setup)
+    # REALITY mode doesn't need camouflage (handled by dest setting)
     if [[ "$SECURITY_MODE" == "tls" ]]; then
         echo -e "${CYAN}=== Step 4: Camouflage Website ===${NC}"
         echo ""
-        echo "Choose camouflage website option:"
-        echo "  1) Reverse proxy Hacker News (default)"
-        echo "  2) Reverse proxy custom URL"
-        echo "  3) Create static HTML page"
-        echo ""
-        read -p "Select option [1]: " camo_choice
-        
-        case "$camo_choice" in
-            2)
-                CAMOUFLAGE_SITE="custom"
-                read -p "Enter URL to reverse proxy (e.g., https://example.com): " CAMOUFLAGE_URL
-                ;;
-            3)
-                CAMOUFLAGE_SITE="static"
-                ;;
-            *)
-                CAMOUFLAGE_SITE="hackernews"
-                CAMOUFLAGE_URL="https://news.ycombinator.com"
-                ;;
-        esac
+        log_info "Camouflage site: Hacker News (news.ycombinator.com)"
+        log_info "This provides cover when unauthorized users access your server."
+        CAMOUFLAGE_SITE="hackernews"
+        CAMOUFLAGE_URL="https://news.ycombinator.com"
     else
         # REALITY mode - no camouflage needed
         echo -e "${CYAN}=== Step 4: Camouflage Website ===${NC}"
@@ -446,18 +430,20 @@ step_create_user() {
     
     # Ask if user wants to set password
     echo ""
+    echo -e "${CYAN}Password Setup for '${XRAY_USER}':${NC}"
+    echo ""
+    echo "The '${XRAY_USER}' user is primarily a service account for running Xray."
+    echo "A password is optional - you can always access it via: sudo su - ${XRAY_USER}"
+    echo ""
+    
     if [[ "$user_exists" == "true" ]]; then
-        read -p "Do you want to change password for user '${XRAY_USER}'? [y/N]: " set_passwd
+        read -p "Do you want to change password for '${XRAY_USER}'? [y/N]: " set_passwd
     else
-        read -p "Do you want to set a password for user '${XRAY_USER}'? [Y/n]: " set_passwd
-        # Default to yes for new users
-        set_passwd="${set_passwd:-y}"
+        read -p "Do you want to set a password for '${XRAY_USER}'? [y/N]: " set_passwd
     fi
     
     if [[ "${set_passwd,,}" == "y" ]]; then
         echo ""
-        log_info "Please set password for user '${XRAY_USER}':"
-        
         while true; do
             read -s -p "Enter password: " pass1
             echo ""
@@ -477,10 +463,8 @@ step_create_user() {
             fi
         done
     else
-        log_info "Skipping password setup."
-        if [[ "$user_exists" == "false" ]]; then
-            log_warn "User '${XRAY_USER}' has no password. Use SSH key or set password later with: sudo passwd ${XRAY_USER}"
-        fi
+        log_info "Skipping password setup (recommended for service accounts)."
+        log_info "Access via: sudo su - ${XRAY_USER}"
     fi
     
     # Create required directories
@@ -555,24 +539,13 @@ step_request_certificate() {
     
     log_step "Requesting SSL certificate for ${DOMAIN}..."
     
-    # Check if port 80 is accessible
-    log_info "Checking port 80 availability..."
-    
-    # Stop services that might use port 80
-    systemctl stop nginx 2>/dev/null || true
-    systemctl stop apache2 2>/dev/null || true
-    systemctl stop httpd 2>/dev/null || true
-    
-    sleep 2
-    
-    # Kill any remaining processes on port 80
-    if lsof -i :80 >/dev/null 2>&1; then
-        log_warn "Port 80 is still in use. Killing processes..."
-        fuser -k 80/tcp 2>/dev/null || true
-        sleep 2
+    # Verify nginx is running on port 80
+    if ! systemctl is-active --quiet nginx; then
+        log_error "Nginx is not running! Cannot request certificate."
+        exit 1
     fi
     
-    # Check firewall
+    # Check firewall settings
     log_info "Checking firewall settings..."
     
     # UFW
@@ -582,9 +555,8 @@ step_request_certificate() {
         ufw allow 443/tcp >/dev/null 2>&1
     fi
     
-    # iptables - check if port 80 is blocked
+    # iptables
     if command -v iptables &>/dev/null; then
-        # Add rule to allow port 80 if not exists
         iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
             iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
         iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || \
@@ -593,101 +565,65 @@ step_request_certificate() {
     
     # firewalld
     if command -v firewall-cmd &>/dev/null && systemctl is-active firewalld &>/dev/null; then
-        log_info "firewalld is active. Ensuring ports 80/443 are allowed..."
         firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1
         firewall-cmd --permanent --add-port=443/tcp >/dev/null 2>&1
         firewall-cmd --reload >/dev/null 2>&1
     fi
     
-    # Verify port 80 is now free
-    if lsof -i :80 >/dev/null 2>&1; then
-        log_error "Port 80 is still occupied!"
+    # Test if the ACME challenge location is accessible
+    log_info "Testing HTTP access to ${DOMAIN}..."
+    
+    # Create a test file
+    echo "test" > "${WEB_DIR}/.well-known/acme-challenge/test"
+    chown "${XRAY_USER}:${XRAY_USER}" "${WEB_DIR}/.well-known/acme-challenge/test"
+    
+    local http_test=$(curl -s -o /dev/null -w "%{http_code}" "http://${DOMAIN}/.well-known/acme-challenge/test" 2>/dev/null || echo "000")
+    rm -f "${WEB_DIR}/.well-known/acme-challenge/test"
+    
+    if [[ "$http_test" == "200" ]]; then
+        log_success "HTTP challenge location is accessible."
+    else
+        log_warn "Could not verify HTTP access (code: ${http_test}). Continuing anyway..."
         echo ""
-        echo "Processes using port 80:"
-        lsof -i :80
+        echo -e "${YELLOW}If certificate issuance fails, check:${NC}"
+        echo "  1. Cloud provider firewall allows port 80"
+        echo "  2. DNS record points to this server"
+        echo "  3. Nginx is serving the webroot correctly"
         echo ""
-        echo "Please free port 80 and try again."
-        exit 1
+        read -p "Press Enter to continue..."
     fi
     
-    log_success "Port 80 is available."
-    
-    # Test connectivity to port 80 from outside (optional check)
-    log_info "Note: Ensure your cloud provider/VPS firewall allows inbound port 80"
-    echo ""
-    echo -e "${YELLOW}Common issues if certificate fails:${NC}"
-    echo "  1. Cloud provider firewall (AWS Security Group, GCP Firewall, etc.)"
-    echo "  2. VPS control panel firewall"
-    echo "  3. Port 80 not forwarded (if behind NAT)"
-    echo ""
-    read -p "Press Enter to continue with certificate request..."
-    
-    # First, test with Let's Encrypt staging server to avoid rate limits
+    # Request certificate using WEBROOT mode (nginx serves the challenge)
     # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
-    log_info "Testing certificate issuance (staging)..."
+    log_info "Requesting certificate using webroot mode..."
     
-    sudo -u "$XRAY_USER" -H bash << EOF
-export HOME="${XRAY_HOME}"
-~/.acme.sh/acme.sh --issue \
-    --server letsencrypt_test \
-    -d ${DOMAIN} \
-    --standalone \
-    --keylength ec-256 \
-    --force \
-    --debug
-EOF
-    
-    if [[ $? -ne 0 ]]; then
-        echo ""
-        log_error "Certificate test failed!"
-        echo ""
-        echo -e "${YELLOW}Troubleshooting steps:${NC}"
-        echo ""
-        echo "1. Check if port 80 is accessible from internet:"
-        echo "   From another machine, run: curl -v http://${DOMAIN}"
-        echo ""
-        echo "2. Check cloud provider firewall:"
-        echo "   - AWS: Security Groups → Inbound Rules → Allow TCP 80"
-        echo "   - GCP: VPC Firewall → Allow tcp:80"
-        echo "   - Azure: NSG → Inbound security rules → Allow 80"
-        echo ""
-        echo "3. Check local firewall:"
-        echo "   - UFW: sudo ufw status"
-        echo "   - iptables: sudo iptables -L -n | grep 80"
-        echo ""
-        echo "4. Test port 80 locally:"
-        echo "   sudo nc -l -p 80 &"
-        echo "   curl http://localhost"
-        echo ""
-        echo "5. Check DNS again:"
-        echo "   dig ${DOMAIN} +short"
-        echo ""
-        
-        read -p "Do you want to retry? [y/N]: " retry
-        if [[ "${retry,,}" == "y" ]]; then
-            step_request_certificate
-            return $?
-        fi
-        
-        exit 1
-    fi
-    
-    log_success "Test certificate issued successfully!"
-    log_info "Now requesting real certificate from Let's Encrypt..."
-    
-    # Request real certificate
     sudo -u "$XRAY_USER" -H bash << EOF
 export HOME="${XRAY_HOME}"
 ~/.acme.sh/acme.sh --issue \
     --server letsencrypt \
     -d ${DOMAIN} \
-    --standalone \
+    -w ${WEB_DIR} \
     --keylength ec-256 \
     --force
 EOF
     
     if [[ $? -ne 0 ]]; then
+        echo ""
         log_error "Certificate issuance failed!"
+        echo ""
+        echo -e "${YELLOW}Troubleshooting steps:${NC}"
+        echo ""
+        echo "1. Check if the domain resolves correctly:"
+        echo "   dig ${DOMAIN} +short"
+        echo ""
+        echo "2. Check if nginx is serving port 80:"
+        echo "   curl -I http://${DOMAIN}/.well-known/acme-challenge/"
+        echo ""
+        echo "3. Check nginx error logs:"
+        echo "   tail -20 /var/log/nginx/error.log"
+        echo ""
+        echo "4. Ensure cloud firewall allows port 80 (AWS/GCP/Azure/etc.)"
+        echo ""
         exit 1
     fi
     
@@ -698,6 +634,24 @@ EOF
     
     sudo -u "$XRAY_USER" -H bash << EOF
 export HOME="${XRAY_HOME}"
+~/.acme.sh/acme.sh --install-cert -d ${DOMAIN} --ecc \
+    --fullchain-file ${CERTS_DIR}/xray.crt \
+    --key-file ${CERTS_DIR}/xray.key
+EOF
+    
+    # Set proper permissions
+    chmod 644 "${CERTS_DIR}/xray.crt"
+    chmod 644 "${CERTS_DIR}/xray.key"
+    
+    # Show certificate info
+    log_info "Certificate details:"
+    openssl x509 -in "${CERTS_DIR}/xray.crt" -noout -subject -dates
+    
+    log_success "SSL certificate installed to ${CERTS_DIR}"
+    
+    # Setup certificate auto-renewal
+    setup_cert_renewal
+}
 ~/.acme.sh/acme.sh --install-cert -d ${DOMAIN} --ecc \
     --fullchain-file ${CERTS_DIR}/xray.crt \
     --key-file ${CERTS_DIR}/xray.key
@@ -781,155 +735,157 @@ EOF
 }
 
 step_setup_nginx() {
-    log_step "Configuring Nginx..."
+    log_step "Setting up Nginx on port 80..."
     
     # Backup original config
     cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak
     
-    # REALITY mode: minimal nginx (just HTTP redirect, or skip entirely)
+    # Change nginx user to xray user
+    sed -i "s/^user .*/user ${XRAY_USER};/" /etc/nginx/nginx.conf
+    
+    # Create webroot directory for ACME challenge
+    mkdir -p "${WEB_DIR}/.well-known/acme-challenge"
+    chown -R "${XRAY_USER}:${XRAY_USER}" "${WEB_DIR}"
+    
+    # REALITY mode: minimal nginx (just HTTP redirect)
     if [[ "$SECURITY_MODE" == "reality" ]]; then
-        log_info "REALITY mode: Nginx fallback not needed (handled by REALITY dest)."
-        log_info "Setting up minimal Nginx for HTTP redirect only..."
+        log_info "REALITY mode: Setting up minimal Nginx..."
         
-        # Minimal nginx config - just redirect HTTP to HTTPS
         cat > /etc/nginx/sites-available/xray << EOF
-# HTTP to HTTPS redirect only (REALITY mode)
-# Fallback is handled by REALITY dest: ${REALITY_DEST}
+# HTTP redirect only (REALITY mode)
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
-    
-    # Redirect all HTTP to HTTPS
     return 301 https://\$host\$request_uri;
-}
-EOF
-        
-        # Enable site
-        ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/
-        rm -f /etc/nginx/sites-enabled/default
-        
-        # Test and reload nginx
-        nginx -t
-        systemctl enable nginx
-        systemctl restart nginx
-        
-        log_success "Nginx configured (minimal - HTTP redirect only)."
-        return 0
-    fi
-    
-    # TLS mode: full camouflage website setup
-    # Create camouflage website
-    if [[ "$CAMOUFLAGE_SITE" == "static" ]]; then
-        # Create static HTML page
-        cat > "${WEB_DIR}/index.html" << 'EOF'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Welcome</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
-        .container { max-width: 800px; margin: 0 auto; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        h1 { color: #333; }
-        p { color: #666; line-height: 1.6; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Welcome to My Website</h1>
-        <p>This is a simple website hosted on this server.</p>
-        <p>Feel free to explore and enjoy your stay!</p>
-    </div>
-</body>
-</html>
-EOF
-        chown -R "${XRAY_USER}:${XRAY_USER}" "${WEB_DIR}"
-    fi
-    
-    # Determine nginx user setting
-    # IMPORTANT: Change nginx user to xray user to avoid permission issues
-    sed -i "s/^user .*/user ${XRAY_USER};/" /etc/nginx/nginx.conf
-    
-    # Create nginx site configuration
-    if [[ "$CAMOUFLAGE_SITE" == "hackernews" || "$CAMOUFLAGE_SITE" == "custom" ]]; then
-        # Reverse proxy configuration
-        PROXY_URL="${CAMOUFLAGE_URL:-https://news.ycombinator.com}"
-        
-        cat > /etc/nginx/sites-available/xray << EOF
-# HTTP to HTTPS redirect
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${DOMAIN};
-    return 301 https://\$host\$request_uri;
-}
-
-# Main HTTPS server (fallback from Xray)
-server {
-    listen 127.0.0.1:8080;
-    server_name ${DOMAIN};
-    
-    # Reverse proxy to camouflage site
-    location / {
-        proxy_pass ${PROXY_URL};
-        proxy_set_header Host news.ycombinator.com;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_ssl_server_name on;
-        
-        # Handle redirects
-        proxy_redirect off;
-        
-        # Disable caching for dynamic content
-        proxy_buffering off;
-    }
-    
-    # Security headers
-    add_header Strict-Transport-Security "max-age=63072000" always;
 }
 EOF
     else
-        # Static file serving configuration
+        # TLS mode: Setup HTTP server for ACME verification + Hacker News reverse proxy
+        # This will be updated later to add HTTPS fallback after certificate is obtained
+        log_info "TLS mode: Setting up HTTP server for certificate verification..."
+        
         cat > /etc/nginx/sites-available/xray << EOF
-# HTTP to HTTPS redirect
+# HTTP server on port 80
+# Purpose: 
+#   1. ACME challenge for certificate issuance/renewal
+#   2. Camouflage site (reverse proxy to Hacker News)
 server {
     listen 80;
     listen [::]:80;
     server_name ${DOMAIN};
-    return 301 https://\$host\$request_uri;
-}
-
-# Main HTTPS server (fallback from Xray)
-server {
-    listen 127.0.0.1:8080;
-    server_name ${DOMAIN};
     
-    root ${WEB_DIR};
-    index index.html;
-    
-    location / {
-        try_files \$uri \$uri/ =404;
+    # ACME challenge location (required for certificate verification)
+    location /.well-known/acme-challenge/ {
+        root ${WEB_DIR};
+        allow all;
     }
     
-    # Security headers
-    add_header Strict-Transport-Security "max-age=63072000" always;
+    # Reverse proxy to Hacker News (camouflage)
+    location / {
+        proxy_pass https://news.ycombinator.com;
+        proxy_set_header Host news.ycombinator.com;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_ssl_server_name on;
+        
+        # Handle redirects
+        proxy_redirect https://news.ycombinator.com/ /;
+    }
 }
 EOF
     fi
     
-    # Enable site
-    ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/
+    # Enable the site
     rm -f /etc/nginx/sites-enabled/default
+    ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
     
-    # Test and reload nginx
-    nginx -t
+    # Test nginx configuration
+    if ! nginx -t; then
+        log_error "Nginx configuration test failed!"
+        exit 1
+    fi
+    
+    # Start nginx
     systemctl enable nginx
     systemctl restart nginx
     
-    log_success "Nginx configured."
+    # Verify nginx is running
+    if ! systemctl is-active --quiet nginx; then
+        log_error "Failed to start nginx!"
+        journalctl -u nginx -n 10
+        exit 1
+    fi
+    
+    log_success "Nginx configured and running on port 80."
+    log_info "Camouflage site: Hacker News (news.ycombinator.com)"
+}
+
+# Update nginx config after certificate is obtained (TLS mode only)
+step_update_nginx_ssl() {
+    if [[ "$SECURITY_MODE" == "reality" ]]; then
+        log_info "REALITY mode - skipping nginx SSL update."
+        return 0
+    fi
+    
+    log_step "Updating Nginx with SSL fallback configuration..."
+    
+    # Now add the SSL fallback server block for Xray
+    cat > /etc/nginx/sites-available/xray << EOF
+# HTTP server on port 80
+# Purpose: ACME challenge + redirect to HTTPS
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+    
+    # ACME challenge location (required for certificate renewal)
+    location /.well-known/acme-challenge/ {
+        root ${WEB_DIR};
+        allow all;
+    }
+    
+    # Redirect all other requests to HTTPS
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+# HTTPS fallback server (receives traffic from Xray on failed auth)
+# Xray listens on 443, falls back to 127.0.0.1:8080 for unauthorized requests
+server {
+    listen 127.0.0.1:8080;
+    server_name ${DOMAIN};
+    
+    # Reverse proxy to Hacker News (camouflage)
+    location / {
+        proxy_pass https://news.ycombinator.com;
+        proxy_set_header Host news.ycombinator.com;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_ssl_server_name on;
+        
+        # Handle redirects
+        proxy_redirect https://news.ycombinator.com/ /;
+        
+        # Optimize
+        proxy_buffering on;
+        proxy_buffer_size 4k;
+        proxy_buffers 8 4k;
+    }
+}
+EOF
+    
+    # Test nginx configuration
+    if ! nginx -t; then
+        log_error "Nginx configuration test failed!"
+        exit 1
+    fi
+    
+    # Reload nginx
+    systemctl reload nginx
+    
+    log_success "Nginx updated with SSL fallback configuration."
 }
 
 step_install_xray() {
@@ -1645,8 +1601,9 @@ main() {
     step_create_user
     step_setup_bbr
     step_install_acme
-    step_request_certificate
-    step_setup_nginx
+    step_setup_nginx         # Setup nginx on port 80 FIRST
+    step_request_certificate # Then request cert using webroot
+    step_update_nginx_ssl    # Update nginx config for SSL
     step_install_xray
     step_configure_xray
     step_configure_xray_service
