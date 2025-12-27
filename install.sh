@@ -516,19 +516,31 @@ EOF
 }
 
 step_install_acme() {
-    log_step "Installing acme.sh..."
+    log_step "Installing acme.sh for user '${XRAY_USER}'..."
     
-    # Install as the xray user
+    # Install acme.sh as the xray user (NOT as root)
     # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
-    sudo -u "$XRAY_USER" -H bash << EOF
-cd ~
-curl https://get.acme.sh | sh -s email=${EMAIL}
-
-# Set default CA to Let's Encrypt (acme.sh defaults to ZeroSSL which requires extra steps)
-~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-EOF
+    sudo -u "$XRAY_USER" -H bash -c "
+        cd ~
+        curl -sS https://get.acme.sh | sh
+        
+        # Make acme.sh command available
+        source ~/.bashrc
+        
+        # Enable auto-upgrade
+        ~/.acme.sh/acme.sh --upgrade --auto-upgrade
+        
+        # Set Let's Encrypt as default CA (ZeroSSL requires extra registration)
+        ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+    "
     
-    log_success "acme.sh installed with Let's Encrypt as default CA."
+    # Verify installation
+    if [[ ! -f "${XRAY_HOME}/.acme.sh/acme.sh" ]]; then
+        log_error "acme.sh installation failed!"
+        exit 1
+    fi
+    
+    log_success "acme.sh installed for user '${XRAY_USER}'."
 }
 
 step_request_certificate() {
@@ -545,37 +557,20 @@ step_request_certificate() {
         exit 1
     fi
     
-    # Check firewall settings
-    log_info "Checking firewall settings..."
-    
-    # UFW
-    if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-        log_info "UFW is active. Ensuring port 80 is allowed..."
-        ufw allow 80/tcp >/dev/null 2>&1
-        ufw allow 443/tcp >/dev/null 2>&1
-    fi
-    
-    # iptables
-    if command -v iptables &>/dev/null; then
-        iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
-            iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
-        iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || \
-            iptables -I INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
-    fi
-    
-    # firewalld
-    if command -v firewall-cmd &>/dev/null && systemctl is-active firewalld &>/dev/null; then
-        firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1
-        firewall-cmd --permanent --add-port=443/tcp >/dev/null 2>&1
-        firewall-cmd --reload >/dev/null 2>&1
+    # Verify acme.sh is installed
+    if [[ ! -f "${XRAY_HOME}/.acme.sh/acme.sh" ]]; then
+        log_error "acme.sh not found at ${XRAY_HOME}/.acme.sh/acme.sh"
+        exit 1
     fi
     
     # Test if the ACME challenge location is accessible
     log_info "Testing HTTP access to ${DOMAIN}..."
     
     # Create a test file
-    echo "test" > "${WEB_DIR}/.well-known/acme-challenge/test"
+    echo "test-$(date +%s)" > "${WEB_DIR}/.well-known/acme-challenge/test"
     chown "${XRAY_USER}:${XRAY_USER}" "${WEB_DIR}/.well-known/acme-challenge/test"
+    
+    sleep 1
     
     local http_test=$(curl -s -o /dev/null -w "%{http_code}" "http://${DOMAIN}/.well-known/acme-challenge/test" 2>/dev/null || echo "000")
     rm -f "${WEB_DIR}/.well-known/acme-challenge/test"
@@ -583,63 +578,73 @@ step_request_certificate() {
     if [[ "$http_test" == "200" ]]; then
         log_success "HTTP challenge location is accessible."
     else
-        log_warn "Could not verify HTTP access (code: ${http_test}). Continuing anyway..."
+        log_warn "Could not verify HTTP access (code: ${http_test})."
         echo ""
         echo -e "${YELLOW}If certificate issuance fails, check:${NC}"
         echo "  1. Cloud provider firewall allows port 80"
-        echo "  2. DNS record points to this server"
-        echo "  3. Nginx is serving the webroot correctly"
+        echo "  2. DNS record points to this server: dig ${DOMAIN} +short"
+        echo "  3. Nginx is running: systemctl status nginx"
         echo ""
-        read -p "Press Enter to continue..."
+        read -p "Press Enter to continue anyway..."
     fi
     
-    # Request certificate using WEBROOT mode (nginx serves the challenge)
+    # Step 1: Test with staging server first (avoid rate limits)
     # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
-    log_info "Requesting certificate using webroot mode..."
+    log_info "Testing certificate issuance (staging server)..."
     
-    sudo -u "$XRAY_USER" -H bash << EOF
-export HOME="${XRAY_HOME}"
-~/.acme.sh/acme.sh --issue \
-    --server letsencrypt \
-    -d ${DOMAIN} \
-    -w ${WEB_DIR} \
-    --keylength ec-256 \
-    --force
-EOF
+    sudo -u "$XRAY_USER" -H bash -c "
+        ${XRAY_HOME}/.acme.sh/acme.sh --issue \
+            --server letsencrypt_test \
+            -d ${DOMAIN} \
+            -w ${WEB_DIR} \
+            --keylength ec-256
+    "
     
     if [[ $? -ne 0 ]]; then
         echo ""
+        log_error "Certificate test failed!"
+        echo ""
+        echo -e "${YELLOW}Troubleshooting:${NC}"
+        echo "  1. Check DNS: dig ${DOMAIN} +short"
+        echo "  2. Check nginx: curl -I http://${DOMAIN}/.well-known/acme-challenge/"
+        echo "  3. Check firewall: Ensure port 80 is open"
+        echo ""
+        echo "Run with debug for more info:"
+        echo "  sudo -u ${XRAY_USER} ${XRAY_HOME}/.acme.sh/acme.sh --issue --server letsencrypt_test -d ${DOMAIN} -w ${WEB_DIR} --keylength ec-256 --debug"
+        echo ""
+        exit 1
+    fi
+    
+    log_success "Test certificate issued successfully!"
+    
+    # Step 2: Request real certificate
+    log_info "Requesting real certificate from Let's Encrypt..."
+    
+    sudo -u "$XRAY_USER" -H bash -c "
+        ${XRAY_HOME}/.acme.sh/acme.sh --issue \
+            -d ${DOMAIN} \
+            -w ${WEB_DIR} \
+            --keylength ec-256 \
+            --force
+    "
+    
+    if [[ $? -ne 0 ]]; then
         log_error "Certificate issuance failed!"
-        echo ""
-        echo -e "${YELLOW}Troubleshooting steps:${NC}"
-        echo ""
-        echo "1. Check if the domain resolves correctly:"
-        echo "   dig ${DOMAIN} +short"
-        echo ""
-        echo "2. Check if nginx is serving port 80:"
-        echo "   curl -I http://${DOMAIN}/.well-known/acme-challenge/"
-        echo ""
-        echo "3. Check nginx error logs:"
-        echo "   tail -20 /var/log/nginx/error.log"
-        echo ""
-        echo "4. Ensure cloud firewall allows port 80 (AWS/GCP/Azure/etc.)"
-        echo ""
         exit 1
     fi
     
     log_success "Certificate issued successfully!"
     
-    # Install certificate to our directory
+    # Step 3: Install certificate to our directory
     log_info "Installing certificate to ${CERTS_DIR}..."
     
-    sudo -u "$XRAY_USER" -H bash << EOF
-export HOME="${XRAY_HOME}"
-~/.acme.sh/acme.sh --install-cert -d ${DOMAIN} --ecc \
-    --fullchain-file ${CERTS_DIR}/xray.crt \
-    --key-file ${CERTS_DIR}/xray.key
-EOF
+    sudo -u "$XRAY_USER" -H bash -c "
+        ${XRAY_HOME}/.acme.sh/acme.sh --install-cert -d ${DOMAIN} --ecc \
+            --fullchain-file ${CERTS_DIR}/xray.crt \
+            --key-file ${CERTS_DIR}/xray.key
+    "
     
-    # Set proper permissions
+    # Set proper permissions (readable by xray service)
     chmod 644 "${CERTS_DIR}/xray.crt"
     chmod 644 "${CERTS_DIR}/xray.key"
     
@@ -676,37 +681,37 @@ setup_cert_renewal() {
     
     # Create certificate renewal script
     # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
-    cat > "${CERTS_DIR}/xray-cert-renew.sh" << 'RENEW_SCRIPT'
+    cat > "${CERTS_DIR}/xray-cert-renew.sh" << EOF
 #!/bin/bash
 #===============================================================================
 # Certificate Renewal Script
 # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
+# Created: $(date)
 #===============================================================================
 
-RENEW_SCRIPT
-
-    cat >> "${CERTS_DIR}/xray-cert-renew.sh" << EOF
 DOMAIN="${DOMAIN}"
 XRAY_HOME="${XRAY_HOME}"
 CERTS_DIR="${CERTS_DIR}"
+WEB_DIR="${WEB_DIR}"
 
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Starting certificate renewal for \${DOMAIN}..."
 
-# Renew certificate using Let's Encrypt
-"\${XRAY_HOME}/.acme.sh/acme.sh" --renew -d "\${DOMAIN}" --ecc --force --server letsencrypt
+# Renew certificate using webroot mode
+\${XRAY_HOME}/.acme.sh/acme.sh --renew -d "\${DOMAIN}" --ecc --force
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Certificate renewed."
 
 # Install certificate
-"\${XRAY_HOME}/.acme.sh/acme.sh" --install-cert -d "\${DOMAIN}" --ecc \\
+\${XRAY_HOME}/.acme.sh/acme.sh --install-cert -d "\${DOMAIN}" --ecc \\
     --fullchain-file "\${CERTS_DIR}/xray.crt" \\
     --key-file "\${CERTS_DIR}/xray.key"
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Certificate installed."
 
 # Set permissions
-chmod +r "\${CERTS_DIR}/xray.key"
+chmod 644 "\${CERTS_DIR}/xray.crt"
+chmod 644 "\${CERTS_DIR}/xray.key"
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Permissions updated."
 
-# Restart Xray
+# Restart Xray to load new certificate
 sudo systemctl restart xray
 echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Xray restarted."
 
