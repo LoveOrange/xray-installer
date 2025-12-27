@@ -1,35 +1,85 @@
 {
+    // REFERENCE:
+    // https://github.com/XTLS/Xray-examples
+    // https://xtls.github.io/config/
+    // 1_日志设置
     "log": {
         "loglevel": "warning",
         "access": "{{LOG_DIR}}/access.log",
         "error": "{{LOG_DIR}}/error.log"
     },
+    // 2_DNS 设置
     "dns": {
         "servers": [
             "https+local://1.1.1.1/dns-query",
             "localhost"
         ]
     },
+    // 3_分流设置
     "routing": {
-        "domainStrategy": "IPIfNonMatch",
+        "domainStrategy": "AsIs",
         "rules": [
+            // 3.1 防止服务器本地流转问题
             {
                 "type": "field",
-                "ip": ["geoip:private"],
+                "ip": [
+                    "geoip:private"
+                ],
                 "outboundTag": "block"
             },
+            // 3.2 防止服务器直连国内
             {
                 "type": "field",
-                "ip": ["geoip:cn"],
+                "ip": [
+                    "geoip:cn"
+                ],
                 "outboundTag": "block"
             },
+            // 3.3 屏蔽广告
             {
                 "type": "field",
-                "domain": ["geosite:category-ads-all"],
+                "domain": [
+                    "geosite:category-ads-all"
+                ],
                 "outboundTag": "block"
+            },
+            // === 3.A AI Sites - Route through residential proxy ===
+            // Block UDP for AI sites (force TCP, avoid exposing datacenter IP)
+            {
+                "type": "field",
+                "network": "udp",
+                "domain": [
+                    "geosite:openai",
+                    "geosite:anthropic",
+                    "domain:anthropic.com",
+                    "domain:claude.ai",
+                    "domain:openai.com",
+                    "domain:chatgpt.com",
+                    "domain:chat.openai.com",
+                    "domain:ai.com"
+                ],
+                "outboundTag": "block"
+            },
+            // TCP: Route AI sites through residential proxy
+            {
+                "type": "field",
+                "network": "tcp",
+                "domain": [
+                    "geosite:openai",
+                    "geosite:anthropic",
+                    "domain:anthropic.com",
+                    "domain:claude.ai",
+                    "domain:openai.com",
+                    "domain:chatgpt.com",
+                    "domain:chat.openai.com",
+                    "domain:ai.com"
+                ],
+                "outboundTag": "residential_proxy"
             }
+            // Note: Unmatched traffic goes to first outbound (direct)
         ]
     },
+    // 4_入站设置
     "inbounds": [
         {
             "port": 443,
@@ -54,7 +104,9 @@
                 "network": "tcp",
                 "security": "tls",
                 "tlsSettings": {
-                    "alpn": ["http/1.1"],
+                    "alpn": [
+                        "http/1.1"
+                    ],
                     "certificates": [
                         {
                             "certificateFile": "{{CERTS_DIR}}/xray.crt",
@@ -65,15 +117,41 @@
             },
             "sniffing": {
                 "enabled": true,
-                "destOverride": ["http", "tls", "quic"]
+                "destOverride": [
+                    "http",
+                    "tls",
+                    "quic"
+                ]
             }
         }
     ],
+    // 5_出站设置
     "outbounds": [
+        // 5.1 默认直连
         {
             "tag": "direct",
             "protocol": "freedom"
         },
+        // 5.2 住宅代理 (Residential SOCKS5 Proxy for AI sites)
+        {
+            "tag": "residential_proxy",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "{{SECONDARY_IP}}",
+                        "port": {{SECONDARY_PORT}},
+                        "users": [
+                            {
+                                "user": "{{SECONDARY_USER}}",
+                                "pass": "{{SECONDARY_PASS}}"
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        // 5.3 黑洞屏蔽
         {
             "tag": "block",
             "protocol": "blackhole"

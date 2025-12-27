@@ -57,6 +57,7 @@ CAMOUFLAGE_SITE="hackernews"  # hackernews, custom, or URL
 # Secondary IP settings
 USE_SECONDARY_IP="no"
 SECONDARY_IP=""
+SECONDARY_PORT=""
 SECONDARY_USER=""
 SECONDARY_PASS=""
 
@@ -101,6 +102,84 @@ check_os() {
         log_error "This script only supports Debian and Ubuntu."
         exit 1
     fi
+}
+
+check_dns_record() {
+    local domain=$1
+    
+    log_info "Checking DNS record for ${domain}..."
+    
+    # Get server's public IP
+    local server_ip=$(curl -s -4 --max-time 10 ifconfig.me 2>/dev/null || \
+                      curl -s -4 --max-time 10 ipinfo.io/ip 2>/dev/null || \
+                      curl -s -4 --max-time 10 icanhazip.com 2>/dev/null)
+    
+    if [[ -z "$server_ip" ]]; then
+        log_warn "Could not detect server's public IP. Skipping DNS check."
+        return 0
+    fi
+    
+    log_info "Server IP: ${server_ip}"
+    
+    # Resolve domain to IP
+    local domain_ip=$(dig +short "$domain" A 2>/dev/null | head -n1)
+    
+    if [[ -z "$domain_ip" ]]; then
+        # Try with host command as fallback
+        domain_ip=$(host "$domain" 2>/dev/null | grep "has address" | head -n1 | awk '{print $NF}')
+    fi
+    
+    if [[ -z "$domain_ip" ]]; then
+        echo ""
+        log_error "DNS lookup failed for ${domain}"
+        echo ""
+        echo -e "${YELLOW}Possible reasons:${NC}"
+        echo "  1. Domain does not exist"
+        echo "  2. DNS record not configured"
+        echo "  3. DNS propagation in progress (wait 5-10 minutes)"
+        echo ""
+        echo -e "${CYAN}To fix:${NC}"
+        echo "  1. Go to your domain registrar / DNS provider"
+        echo "  2. Add an A record:"
+        echo "     - Name: $(echo $domain | cut -d. -f1)"
+        echo "     - Type: A"
+        echo "     - Value: ${server_ip}"
+        echo "  3. Wait for DNS propagation (usually 5-10 minutes)"
+        echo ""
+        read -p "Continue anyway? [y/N]: " continue_anyway
+        if [[ "${continue_anyway,,}" != "y" ]]; then
+            exit 1
+        fi
+        return 1
+    fi
+    
+    log_info "Domain ${domain} resolves to: ${domain_ip}"
+    
+    # Compare IPs
+    if [[ "$server_ip" != "$domain_ip" ]]; then
+        echo ""
+        log_error "DNS record mismatch!"
+        echo ""
+        echo -e "${YELLOW}Current status:${NC}"
+        echo "  Server IP:     ${server_ip}"
+        echo "  Domain points: ${domain_ip}"
+        echo ""
+        echo -e "${CYAN}This will cause certificate issuance to fail!${NC}"
+        echo ""
+        echo "To fix:"
+        echo "  1. Update your DNS A record to point to: ${server_ip}"
+        echo "  2. Wait for DNS propagation (5-10 minutes)"
+        echo "  3. Run this script again"
+        echo ""
+        read -p "Continue anyway? [y/N]: " continue_anyway
+        if [[ "${continue_anyway,,}" != "y" ]]; then
+            exit 1
+        fi
+        return 1
+    fi
+    
+    log_success "DNS record is correct! ${domain} → ${server_ip}"
+    return 0
 }
 
 interactive_setup() {
@@ -164,6 +243,8 @@ interactive_setup() {
             SECURITY_MODE="reality"
             echo ""
             log_info "REALITY mode selected."
+            log_info "Note: Domain is used for identification only, DNS record not required."
+            echo ""
             read -p "Enter REALITY destination (e.g., www.microsoft.com:443) [${REALITY_DEST}]: " input
             REALITY_DEST="${input:-$REALITY_DEST}"
             
@@ -173,44 +254,71 @@ interactive_setup() {
         *)
             SECURITY_MODE="tls"
             log_info "TLS mode selected."
+            echo ""
+            # Check DNS record for TLS mode
+            check_dns_record "$DOMAIN"
             ;;
     esac
     
     echo ""
-    echo -e "${CYAN}=== Step 4: Camouflage Website ===${NC}"
-    echo ""
-    echo "Choose camouflage website option:"
-    echo "  1) Reverse proxy Hacker News (default)"
-    echo "  2) Reverse proxy custom URL"
-    echo "  3) Create static HTML page"
-    echo ""
-    read -p "Select option [1]: " camo_choice
     
-    case "$camo_choice" in
-        2)
-            CAMOUFLAGE_SITE="custom"
-            read -p "Enter URL to reverse proxy (e.g., https://example.com): " CAMOUFLAGE_URL
-            ;;
-        3)
-            CAMOUFLAGE_SITE="static"
-            ;;
-        *)
-            CAMOUFLAGE_SITE="hackernews"
-            CAMOUFLAGE_URL="https://news.ycombinator.com"
-            ;;
-    esac
+    # Only ask about camouflage website in TLS mode
+    # In REALITY mode, the "dest" setting handles all fallback
+    if [[ "$SECURITY_MODE" == "tls" ]]; then
+        echo -e "${CYAN}=== Step 4: Camouflage Website ===${NC}"
+        echo ""
+        echo "Choose camouflage website option:"
+        echo "  1) Reverse proxy Hacker News (default)"
+        echo "  2) Reverse proxy custom URL"
+        echo "  3) Create static HTML page"
+        echo ""
+        read -p "Select option [1]: " camo_choice
+        
+        case "$camo_choice" in
+            2)
+                CAMOUFLAGE_SITE="custom"
+                read -p "Enter URL to reverse proxy (e.g., https://example.com): " CAMOUFLAGE_URL
+                ;;
+            3)
+                CAMOUFLAGE_SITE="static"
+                ;;
+            *)
+                CAMOUFLAGE_SITE="hackernews"
+                CAMOUFLAGE_URL="https://news.ycombinator.com"
+                ;;
+        esac
+    else
+        # REALITY mode - no camouflage needed
+        echo -e "${CYAN}=== Step 4: Camouflage Website ===${NC}"
+        echo ""
+        log_info "REALITY mode uses '${REALITY_DEST}' as fallback destination."
+        log_info "No additional camouflage website needed."
+        CAMOUFLAGE_SITE="none"
+    fi
     
     echo ""
-    echo -e "${CYAN}=== Step 5: Secondary IP Configuration (Optional) ===${NC}"
+    echo -e "${CYAN}=== Step 5: Residential Proxy for AI Sites (Optional) ===${NC}"
     echo ""
-    read -p "Do you want to use a secondary IP for specific sites? [y/N]: " use_sec_ip
+    echo "Route AI sites (ChatGPT, Claude, etc.) through a residential proxy"
+    echo "to avoid datacenter IP detection."
+    echo ""
+    read -p "Do you want to use a residential proxy for AI sites? [y/N]: " use_sec_ip
     
     if [[ "${use_sec_ip,,}" == "y" ]]; then
         USE_SECONDARY_IP="yes"
-        read -p "Enter secondary server IP: " SECONDARY_IP
-        read -p "Enter SSH username for secondary server: " SECONDARY_USER
-        read -s -p "Enter SSH password for secondary server: " SECONDARY_PASS
         echo ""
+        echo "Enter your SOCKS5 proxy details:"
+        read -p "  Proxy IP address: " SECONDARY_IP
+        read -p "  Proxy port: " SECONDARY_PORT
+        read -p "  Username: " SECONDARY_USER
+        read -s -p "  Password: " SECONDARY_PASS
+        echo ""
+        
+        # Validate port
+        if ! [[ "$SECONDARY_PORT" =~ ^[0-9]+$ ]]; then
+            log_error "Invalid port number"
+            USE_SECONDARY_IP="no"
+        fi
     fi
     
     echo ""
@@ -227,7 +335,8 @@ interactive_setup() {
     echo -e "  Web Dir:        ${GREEN}${WEB_DIR}${NC}"
     echo -e "  Log Dir:        ${GREEN}${LOG_DIR}${NC}"
     if [[ "$USE_SECONDARY_IP" == "yes" ]]; then
-        echo -e "  Secondary IP:   ${GREEN}${SECONDARY_IP}${NC}"
+        echo -e "  Residential Proxy: ${GREEN}${SECONDARY_IP}:${SECONDARY_PORT}${NC}"
+        echo -e "  AI Sites Routed:   ${GREEN}ChatGPT, Claude, OpenAI${NC}"
     fi
     echo ""
     
@@ -265,6 +374,7 @@ CAMOUFLAGE_URL="${CAMOUFLAGE_URL:-}"
 
 USE_SECONDARY_IP="${USE_SECONDARY_IP}"
 SECONDARY_IP="${SECONDARY_IP:-}"
+SECONDARY_PORT="${SECONDARY_PORT:-}"
 SECONDARY_USER="${SECONDARY_USER:-}"
 EOF
 
@@ -305,11 +415,13 @@ step_install_packages() {
         lsof \
         net-tools \
         dnsutils \
+        bind9-host \
         ca-certificates \
         gnupg \
         sudo \
         nginx \
-        jq
+        jq \
+        openssl
     
     log_success "Essential packages installed."
 }
@@ -432,8 +544,7 @@ EOF
 export HOME="${XRAY_HOME}"
 ~/.acme.sh/acme.sh --install-cert -d ${DOMAIN} --ecc \
     --fullchain-file ${CERTS_DIR}/xray.crt \
-    --key-file ${CERTS_DIR}/xray.key \
-    --reloadcmd "sudo systemctl restart xray"
+    --key-file ${CERTS_DIR}/xray.key
 EOF
     
     # Set proper permissions
@@ -441,6 +552,67 @@ EOF
     chmod 644 "${CERTS_DIR}/xray.key"
     
     log_success "SSL certificate installed to ${CERTS_DIR}"
+    
+    # Setup certificate auto-renewal
+    setup_cert_renewal
+}
+
+setup_cert_renewal() {
+    log_info "Setting up automatic certificate renewal..."
+    
+    # Create certificate renewal script
+    # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
+    cat > "${CERTS_DIR}/xray-cert-renew.sh" << EOF
+#!/bin/bash
+#===============================================================================
+# Certificate Renewal Script
+# Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
+# Created: $(date)
+#===============================================================================
+
+DOMAIN="${DOMAIN}"
+XRAY_HOME="${XRAY_HOME}"
+CERTS_DIR="${CERTS_DIR}"
+
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Starting certificate renewal for \${DOMAIN}..."
+
+# Renew certificate
+"\${XRAY_HOME}/.acme.sh/acme.sh" --renew -d "\${DOMAIN}" --ecc --force
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Certificate renewed."
+
+# Install certificate
+"\${XRAY_HOME}/.acme.sh/acme.sh" --install-cert -d "\${DOMAIN}" --ecc \\
+    --fullchain-file "\${CERTS_DIR}/xray.crt" \\
+    --key-file "\${CERTS_DIR}/xray.key"
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Certificate installed."
+
+# Set permissions
+chmod +r "\${CERTS_DIR}/xray.key"
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Permissions updated."
+
+# Restart Xray
+sudo systemctl restart xray
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Xray restarted."
+
+echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Certificate renewal completed!"
+EOF
+    
+    # Make script executable and set ownership
+    chmod +x "${CERTS_DIR}/xray-cert-renew.sh"
+    chown "${XRAY_USER}:${XRAY_USER}" "${CERTS_DIR}/xray-cert-renew.sh"
+    
+    # Add crontab entry for monthly renewal (1st day of month at 1:00 AM)
+    local cron_cmd="0 1 1 * * bash ${CERTS_DIR}/xray-cert-renew.sh >> ${CERTS_DIR}/renewal.log 2>&1"
+    
+    # Add to user's crontab if not already present
+    if ! sudo -u "$XRAY_USER" crontab -l 2>/dev/null | grep -q "xray-cert-renew.sh"; then
+        (sudo -u "$XRAY_USER" crontab -l 2>/dev/null; echo "$cron_cmd") | sudo -u "$XRAY_USER" crontab -
+        log_info "Crontab entry added: Monthly certificate renewal on the 1st at 1:00 AM"
+    else
+        log_info "Crontab entry already exists"
+    fi
+    
+    log_success "Certificate auto-renewal configured."
 }
 
 step_setup_nginx() {
@@ -449,6 +621,39 @@ step_setup_nginx() {
     # Backup original config
     cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak
     
+    # REALITY mode: minimal nginx (just HTTP redirect, or skip entirely)
+    if [[ "$SECURITY_MODE" == "reality" ]]; then
+        log_info "REALITY mode: Nginx fallback not needed (handled by REALITY dest)."
+        log_info "Setting up minimal Nginx for HTTP redirect only..."
+        
+        # Minimal nginx config - just redirect HTTP to HTTPS
+        cat > /etc/nginx/sites-available/xray << EOF
+# HTTP to HTTPS redirect only (REALITY mode)
+# Fallback is handled by REALITY dest: ${REALITY_DEST}
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    
+    # Redirect all HTTP to HTTPS
+    return 301 https://\$host\$request_uri;
+}
+EOF
+        
+        # Enable site
+        ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/
+        rm -f /etc/nginx/sites-enabled/default
+        
+        # Test and reload nginx
+        nginx -t
+        systemctl enable nginx
+        systemctl restart nginx
+        
+        log_success "Nginx configured (minimal - HTTP redirect only)."
+        return 0
+    fi
+    
+    # TLS mode: full camouflage website setup
     # Create camouflage website
     if [[ "$CAMOUFLAGE_SITE" == "static" ]]; then
         # Create static HTML page
@@ -589,17 +794,90 @@ step_configure_xray() {
         log_info "REALITY Public Key: ${PUBLIC_KEY}"
         log_info "Short ID: ${SHORT_ID}"
         
-        # Create REALITY configuration
-        cat > /usr/local/etc/xray/config.json << EOF
-{
-    "log": {
-        "loglevel": "warning",
-        "access": "${LOG_DIR}/access.log",
-        "error": "${LOG_DIR}/error.log"
-    },
-    "routing": {
-        "domainStrategy": "IPIfNonMatch",
-        "rules": [
+        # Build server names JSON array
+        SERVER_NAMES_JSON=$(echo "${REALITY_SERVER_NAMES}" | sed 's/,/","/g' | sed 's/^/["/;s/$/"]/')
+        
+        # Build routing rules based on whether residential proxy is configured
+        if [[ "$USE_SECONDARY_IP" == "yes" ]]; then
+            ROUTING_RULES='"rules": [
+            {
+                "type": "field",
+                "ip": ["geoip:private"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "ip": ["geoip:cn"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "domain": ["geosite:category-ads-all"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "network": "udp",
+                "domain": [
+                    "geosite:openai",
+                    "geosite:anthropic",
+                    "domain:anthropic.com",
+                    "domain:claude.ai",
+                    "domain:openai.com",
+                    "domain:chatgpt.com",
+                    "domain:chat.openai.com",
+                    "domain:ai.com"
+                ],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "network": "tcp",
+                "domain": [
+                    "geosite:openai",
+                    "geosite:anthropic",
+                    "domain:anthropic.com",
+                    "domain:claude.ai",
+                    "domain:openai.com",
+                    "domain:chatgpt.com",
+                    "domain:chat.openai.com",
+                    "domain:ai.com"
+                ],
+                "outboundTag": "residential_proxy"
+            }
+        ]'
+            DOMAIN_STRATEGY="AsIs"
+            OUTBOUNDS='"outbounds": [
+        {
+            "tag": "direct",
+            "protocol": "freedom"
+        },
+        {
+            "tag": "residential_proxy",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "'"${SECONDARY_IP}"'",
+                        "port": '"${SECONDARY_PORT}"',
+                        "users": [
+                            {
+                                "user": "'"${SECONDARY_USER}"'",
+                                "pass": "'"${SECONDARY_PASS}"'"
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "tag": "block",
+            "protocol": "blackhole"
+        }
+    ]'
+        else
+            # Simple routing without residential proxy
+            ROUTING_RULES='"rules": [
             {
                 "type": "field",
                 "ip": ["geoip:private"],
@@ -615,7 +893,31 @@ step_configure_xray() {
                 "domain": ["geosite:category-ads-all"],
                 "outboundTag": "block"
             }
-        ]
+        ]'
+            DOMAIN_STRATEGY="IPIfNonMatch"
+            OUTBOUNDS='"outbounds": [
+        {
+            "tag": "direct",
+            "protocol": "freedom"
+        },
+        {
+            "tag": "block",
+            "protocol": "blackhole"
+        }
+    ]'
+        fi
+        
+        # Create REALITY configuration
+        cat > /usr/local/etc/xray/config.json << EOF
+{
+    "log": {
+        "loglevel": "warning",
+        "access": "${LOG_DIR}/access.log",
+        "error": "${LOG_DIR}/error.log"
+    },
+    "routing": {
+        "domainStrategy": "${DOMAIN_STRATEGY}",
+        ${ROUTING_RULES}
     },
     "inbounds": [
         {
@@ -638,7 +940,7 @@ step_configure_xray() {
                     "show": false,
                     "dest": "${REALITY_DEST}",
                     "xver": 0,
-                    "serverNames": [$(echo "${REALITY_SERVER_NAMES}" | sed 's/,/","/g' | sed 's/^/"/;s/$/"/')],
+                    "serverNames": ${SERVER_NAMES_JSON},
                     "privateKey": "${PRIVATE_KEY}",
                     "shortIds": ["${SHORT_ID}", ""]
                 }
@@ -649,58 +951,171 @@ step_configure_xray() {
             }
         }
     ],
-    "outbounds": [
+    ${OUTBOUNDS}
+}
+EOF
+        
+        # Save client configuration info
+        SERVER_IP=$(curl -s -4 ifconfig.me 2>/dev/null || echo "YOUR_SERVER_IP")
+        
+        cat > "${XRAY_HOME}/client-config.txt" << EOF
+================================================================================
+                    XRAY CLIENT CONFIGURATION
+                    Generated: $(date)
+================================================================================
+
+=== Server Information ===
+Server IP:      ${SERVER_IP}
+Port:           443
+Protocol:       VLESS
+Security:       REALITY
+Network:        TCP
+
+=== VLESS Settings ===
+UUID:           ${UUID}
+Flow:           xtls-rprx-vision
+Encryption:     none
+
+=== REALITY Settings ===
+SNI:            $(echo "${REALITY_SERVER_NAMES}" | cut -d',' -f1)
+Fingerprint:    chrome (recommended) / firefox / safari
+Public Key:     ${PUBLIC_KEY}
+Short ID:       ${SHORT_ID}
+
+=== Share Links ===
+
+--- v2rayN / v2rayNG / Nekoray ---
+vless://${UUID}@${SERVER_IP}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(echo "${REALITY_SERVER_NAMES}" | cut -d',' -f1)&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-REALITY
+
+--- Clash Meta / Stash ---
+- name: "Xray-REALITY"
+  type: vless
+  server: ${SERVER_IP}
+  port: 443
+  uuid: ${UUID}
+  network: tcp
+  udp: true
+  tls: true
+  flow: xtls-rprx-vision
+  servername: $(echo "${REALITY_SERVER_NAMES}" | cut -d',' -f1)
+  reality-opts:
+    public-key: ${PUBLIC_KEY}
+    short-id: ${SHORT_ID}
+  client-fingerprint: chrome
+
+--- Shadowrocket (iOS) ---
+vless://${UUID}@${SERVER_IP}:443?encryption=none&security=reality&type=tcp&headerType=none&host=$(echo "${REALITY_SERVER_NAMES}" | cut -d',' -f1)&sni=$(echo "${REALITY_SERVER_NAMES}" | cut -d',' -f1)&fp=ios&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&flow=xtls-rprx-vision#Xray-REALITY
+
+--- Quantumult X ---
+vless=${SERVER_IP}:443, method=none, password=${UUID}, obfs=over-tls, obfs-host=$(echo "${REALITY_SERVER_NAMES}" | cut -d',' -f1), tls-verification=false, fast-open=false, udp-relay=false, tag=Xray-REALITY
+
+================================================================================
+                         IMPORTANT NOTES
+================================================================================
+1. Replace "chrome" with your preferred fingerprint if needed
+2. This configuration uses REALITY - no domain/certificate needed
+3. Keep your UUID and keys secure - they are your authentication
+
+EOF
+        if [[ "$USE_SECONDARY_IP" == "yes" ]]; then
+            cat >> "${XRAY_HOME}/client-config.txt" << EOF
+================================================================================
+                    AI SITES ROUTING (Server-Side)
+================================================================================
+The following sites are routed through residential proxy on the server:
+  ✓ claude.ai / anthropic.com
+  ✓ chatgpt.com / openai.com / chat.openai.com
+  ✓ ai.com
+
+Residential Proxy: ${SECONDARY_IP}:${SECONDARY_PORT}
+
+This is transparent to clients - just connect normally!
+================================================================================
+EOF
+        fi
+        
+    else
+        # TLS configuration
+        if [[ "$USE_SECONDARY_IP" == "yes" ]]; then
+            ROUTING_RULES='"rules": [
+            {
+                "type": "field",
+                "ip": ["geoip:private"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "ip": ["geoip:cn"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "domain": ["geosite:category-ads-all"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "network": "udp",
+                "domain": [
+                    "geosite:openai",
+                    "geosite:anthropic",
+                    "domain:anthropic.com",
+                    "domain:claude.ai",
+                    "domain:openai.com",
+                    "domain:chatgpt.com",
+                    "domain:chat.openai.com",
+                    "domain:ai.com"
+                ],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "network": "tcp",
+                "domain": [
+                    "geosite:openai",
+                    "geosite:anthropic",
+                    "domain:anthropic.com",
+                    "domain:claude.ai",
+                    "domain:openai.com",
+                    "domain:chatgpt.com",
+                    "domain:chat.openai.com",
+                    "domain:ai.com"
+                ],
+                "outboundTag": "residential_proxy"
+            }
+        ]'
+            DOMAIN_STRATEGY="AsIs"
+            OUTBOUNDS='"outbounds": [
         {
             "tag": "direct",
             "protocol": "freedom"
         },
         {
+            "tag": "residential_proxy",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "'"${SECONDARY_IP}"'",
+                        "port": '"${SECONDARY_PORT}"',
+                        "users": [
+                            {
+                                "user": "'"${SECONDARY_USER}"'",
+                                "pass": "'"${SECONDARY_PASS}"'"
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
             "tag": "block",
             "protocol": "blackhole"
         }
-    ]
-}
-EOF
-        
-        # Save client configuration info
-        cat > "${XRAY_HOME}/client-config.txt" << EOF
-=== Xray REALITY Client Configuration ===
-
-Protocol: VLESS
-Address: YOUR_SERVER_IP
-Port: 443
-UUID: ${UUID}
-Flow: xtls-rprx-vision
-Network: tcp
-Security: reality
-SNI: $(echo "${REALITY_SERVER_NAMES}" | cut -d',' -f1)
-Fingerprint: chrome
-Public Key: ${PUBLIC_KEY}
-Short ID: ${SHORT_ID}
-
-=== v2rayN/v2rayNG Share Link ===
-vless://${UUID}@YOUR_SERVER_IP:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(echo "${REALITY_SERVER_NAMES}" | cut -d',' -f1)&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#REALITY-${DOMAIN}
-
-EOF
-        
-    else
-        # TLS configuration
-        cat > /usr/local/etc/xray/config.json << EOF
-{
-    "log": {
-        "loglevel": "warning",
-        "access": "${LOG_DIR}/access.log",
-        "error": "${LOG_DIR}/error.log"
-    },
-    "dns": {
-        "servers": [
-            "https+local://1.1.1.1/dns-query",
-            "localhost"
-        ]
-    },
-    "routing": {
-        "domainStrategy": "IPIfNonMatch",
-        "rules": [
+    ]'
+        else
+            # Simple routing without residential proxy
+            ROUTING_RULES='"rules": [
             {
                 "type": "field",
                 "ip": ["geoip:private"],
@@ -716,7 +1131,37 @@ EOF
                 "domain": ["geosite:category-ads-all"],
                 "outboundTag": "block"
             }
+        ]'
+            DOMAIN_STRATEGY="IPIfNonMatch"
+            OUTBOUNDS='"outbounds": [
+        {
+            "tag": "direct",
+            "protocol": "freedom"
+        },
+        {
+            "tag": "block",
+            "protocol": "blackhole"
+        }
+    ]'
+        fi
+        
+        # Create TLS configuration
+        cat > /usr/local/etc/xray/config.json << EOF
+{
+    "log": {
+        "loglevel": "warning",
+        "access": "${LOG_DIR}/access.log",
+        "error": "${LOG_DIR}/error.log"
+    },
+    "dns": {
+        "servers": [
+            "https+local://1.1.1.1/dns-query",
+            "localhost"
         ]
+    },
+    "routing": {
+        "domainStrategy": "${DOMAIN_STRATEGY}",
+        ${ROUTING_RULES}
     },
     "inbounds": [
         {
@@ -757,36 +1202,99 @@ EOF
             }
         }
     ],
-    "outbounds": [
-        {
-            "tag": "direct",
-            "protocol": "freedom"
-        },
-        {
-            "tag": "block",
-            "protocol": "blackhole"
-        }
-    ]
+    ${OUTBOUNDS}
 }
 EOF
         
         # Save client configuration info
+        SERVER_IP=$(curl -s -4 ifconfig.me 2>/dev/null || echo "YOUR_SERVER_IP")
+        
         cat > "${XRAY_HOME}/client-config.txt" << EOF
-=== Xray TLS Client Configuration ===
+================================================================================
+                    XRAY CLIENT CONFIGURATION
+                    Generated: $(date)
+================================================================================
 
-Protocol: VLESS
-Address: ${DOMAIN}
-Port: 443
-UUID: ${UUID}
-Flow: xtls-rprx-vision
-Network: tcp
-Security: tls
-SNI: ${DOMAIN}
+=== Server Information ===
+Domain:         ${DOMAIN}
+Server IP:      ${SERVER_IP}
+Port:           443
+Protocol:       VLESS
+Security:       TLS
+Network:        TCP
 
-=== v2rayN/v2rayNG Share Link ===
-vless://${UUID}@${DOMAIN}:443?encryption=none&flow=xtls-rprx-vision&security=tls&sni=${DOMAIN}&type=tcp#TLS-${DOMAIN}
+=== VLESS Settings ===
+UUID:           ${UUID}
+Flow:           xtls-rprx-vision
+Encryption:     none
+
+=== TLS Settings ===
+SNI:            ${DOMAIN}
+ALPN:           http/1.1
+Allow Insecure: false
+
+=== Share Links ===
+
+--- v2rayN / v2rayNG / Nekoray ---
+vless://${UUID}@${DOMAIN}:443?encryption=none&flow=xtls-rprx-vision&security=tls&sni=${DOMAIN}&alpn=http%2F1.1&type=tcp#Xray-TLS
+
+--- Clash Meta / Stash ---
+- name: "Xray-TLS"
+  type: vless
+  server: ${DOMAIN}
+  port: 443
+  uuid: ${UUID}
+  network: tcp
+  udp: true
+  tls: true
+  flow: xtls-rprx-vision
+  servername: ${DOMAIN}
+  client-fingerprint: chrome
+
+--- Shadowrocket (iOS) ---
+vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&type=tcp&headerType=none&host=${DOMAIN}&sni=${DOMAIN}&flow=xtls-rprx-vision#Xray-TLS
+
+--- Quantumult X ---
+vless=${DOMAIN}:443, method=none, password=${UUID}, obfs=over-tls, obfs-host=${DOMAIN}, tls-verification=true, fast-open=false, udp-relay=false, tag=Xray-TLS
+
+================================================================================
+                         CERTIFICATE INFO
+================================================================================
+Certificate Location: ${CERTS_DIR}/xray.crt
+Private Key Location: ${CERTS_DIR}/xray.key
+Auto-Renewal Script:  ${CERTS_DIR}/xray-cert-renew.sh
+Renewal Schedule:     1st of each month at 1:00 AM
+
+To manually renew certificate:
+  sudo -u ${XRAY_USER} bash ${CERTS_DIR}/xray-cert-renew.sh
+
+To check certificate expiry:
+  openssl x509 -in ${CERTS_DIR}/xray.crt -noout -dates
+
+================================================================================
+                         IMPORTANT NOTES
+================================================================================
+1. Use the domain name (${DOMAIN}) as server address, not IP
+2. TLS certificate is valid for 90 days, auto-renewed monthly
+3. Keep your UUID secure - it is your authentication
 
 EOF
+        if [[ "$USE_SECONDARY_IP" == "yes" ]]; then
+            cat >> "${XRAY_HOME}/client-config.txt" << EOF
+================================================================================
+                    AI SITES ROUTING (Server-Side)
+================================================================================
+The following sites are routed through residential proxy on the server:
+  ✓ claude.ai / anthropic.com
+  ✓ chatgpt.com / openai.com / chat.openai.com
+  ✓ ai.com
+
+Residential Proxy: ${SECONDARY_IP}:${SECONDARY_PORT}
+
+This is transparent to clients - just connect normally!
+================================================================================
+EOF
+        fi
     fi
     
     chown "${XRAY_USER}:${XRAY_USER}" "${XRAY_HOME}/client-config.txt"
@@ -904,26 +1412,40 @@ show_completion() {
     echo -e "${GREEN}║          Installation Completed Successfully!              ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "${CYAN}Summary:${NC}"
+    echo -e "${CYAN}=== Server Summary ===${NC}"
     echo -e "  User:           ${YELLOW}${XRAY_USER}${NC}"
-    echo -e "  Domain:         ${YELLOW}${DOMAIN}${NC}"
-    echo -e "  Security Mode:  ${YELLOW}${SECURITY_MODE}${NC}"
+    echo -e "  Security Mode:  ${YELLOW}${SECURITY_MODE^^}${NC}"
+    if [[ "$SECURITY_MODE" == "tls" ]]; then
+        echo -e "  Domain:         ${YELLOW}${DOMAIN}${NC}"
+    else
+        echo -e "  REALITY Dest:   ${YELLOW}${REALITY_DEST}${NC}"
+    fi
+    if [[ "$USE_SECONDARY_IP" == "yes" ]]; then
+        echo -e "  AI Sites Proxy: ${YELLOW}${SECONDARY_IP}:${SECONDARY_PORT}${NC}"
+    fi
     echo ""
-    echo -e "${CYAN}Important Files:${NC}"
+    echo -e "${CYAN}=== Important Files ===${NC}"
     echo -e "  Client Config:  ${YELLOW}${XRAY_HOME}/client-config.txt${NC}"
     echo -e "  Xray Config:    ${YELLOW}/usr/local/etc/xray/config.json${NC}"
     echo -e "  Xray Logs:      ${YELLOW}${LOG_DIR}/${NC}"
-    echo -e "  Certificates:   ${YELLOW}${CERTS_DIR}/${NC}"
+    if [[ "$SECURITY_MODE" == "tls" ]]; then
+        echo -e "  Certificates:   ${YELLOW}${CERTS_DIR}/${NC}"
+        echo -e "  Cert Renewal:   ${YELLOW}${CERTS_DIR}/xray-cert-renew.sh${NC}"
+    fi
     echo ""
-    echo -e "${CYAN}Management Commands:${NC}"
+    echo -e "${CYAN}=== Management Commands ===${NC}"
     echo -e "  Check status:   ${YELLOW}sudo systemctl status xray${NC}"
     echo -e "  Restart Xray:   ${YELLOW}sudo systemctl restart xray${NC}"
     echo -e "  View logs:      ${YELLOW}tail -f ${LOG_DIR}/error.log${NC}"
+    echo -e "  View config:    ${YELLOW}cat ${XRAY_HOME}/client-config.txt${NC}"
     echo ""
-    echo -e "${CYAN}Client Configuration:${NC}"
+    echo -e "${CYAN}=== Client Configuration ===${NC}"
+    echo ""
     cat "${XRAY_HOME}/client-config.txt"
     echo ""
-    echo -e "${GREEN}Enjoy your secure connection!${NC}"
+    echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  Scan the QR code or copy the share link to your client!   ${NC}"
+    echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
 }
 
 #===============================================================================
