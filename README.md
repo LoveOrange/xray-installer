@@ -10,7 +10,7 @@ Based on the [official XTLS documentation](https://xtls.github.io/document/level
 
 ```bash
 # Clone and run
-git clone https://github.com/loveorangesad/xray-installer.git
+git clone https://github.com/LoveOrange/xray-installer.git
 cd xray-installer
 sudo bash install.sh
 ```

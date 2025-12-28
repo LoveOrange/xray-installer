@@ -10,7 +10,7 @@
 
 ```bash
 # 克隆并运行
-git clone https://github.com/loveorangesad/xray-installer.git
+git clone https://github.com/LoveOrange/xray-installer.git
 cd xray-installer
 sudo bash install.sh
 ```
