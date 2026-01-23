@@ -33,6 +33,125 @@ command_exists() {
     command -v "$1" &> /dev/null
 }
 
+#===============================================================================
+# Multi-OS Support Functions
+#===============================================================================
+
+# OS detection variables (will be set by detect_os)
+OS=""
+OS_VERSION=""
+PKG_MANAGER=""
+PKG_UPDATE=""
+PKG_INSTALL=""
+
+# Detect operating system and set package manager
+detect_os() {
+    if [[ -f /etc/os-release ]]; then
+        source /etc/os-release
+        OS=$ID
+        OS_VERSION=$VERSION_ID
+    else
+        log_error "Cannot detect OS. /etc/os-release not found."
+        return 1
+    fi
+
+    log_info "Detected OS: ${OS} ${OS_VERSION}"
+
+    case $OS in
+        ubuntu|debian)
+            PKG_MANAGER="apt"
+            PKG_UPDATE="apt-get update -y"
+            PKG_INSTALL="apt-get install -y"
+            ;;
+        centos|rhel|fedora|rocky|almalinux)
+            PKG_MANAGER="yum"
+            PKG_UPDATE="yum update -y"
+            PKG_INSTALL="yum install -y"
+            # Check if dnf is available (newer systems)
+            if command_exists dnf; then
+                PKG_MANAGER="dnf"
+                PKG_UPDATE="dnf update -y"
+                PKG_INSTALL="dnf install -y"
+            fi
+            ;;
+        arch|manjaro)
+            PKG_MANAGER="pacman"
+            PKG_UPDATE="pacman -Syu --noconfirm"
+            PKG_INSTALL="pacman -S --noconfirm"
+            ;;
+        *)
+            log_error "Unsupported OS: $OS"
+            log_info "Supported: Debian, Ubuntu, CentOS, RHEL, Fedora, Rocky Linux, AlmaLinux, Arch, Manjaro"
+            return 1
+            ;;
+    esac
+
+    log_success "Package manager: ${PKG_MANAGER}"
+    return 0
+}
+
+# Update package manager cache
+update_packages() {
+    if [[ -z "$PKG_UPDATE" ]]; then
+        detect_os || return 1
+    fi
+
+    log_info "Updating package manager cache..."
+    eval "$PKG_UPDATE"
+}
+
+# Install packages (with OS-specific package name mapping)
+install_packages() {
+    if [[ -z "$PKG_INSTALL" ]]; then
+        detect_os || return 1
+    fi
+
+    local packages=("$@")
+    local mapped_packages=()
+
+    # Map package names to OS-specific names
+    for pkg in "${packages[@]}"; do
+        case "$pkg" in
+            # Handle packages with different names across distros
+            "dnsutils")
+                if [[ "$PKG_MANAGER" == "yum" || "$PKG_MANAGER" == "dnf" ]]; then
+                    mapped_packages+=("bind-utils")
+                elif [[ "$PKG_MANAGER" == "pacman" ]]; then
+                    mapped_packages+=("bind")
+                else
+                    mapped_packages+=("$pkg")
+                fi
+                ;;
+            "bind9-host")
+                if [[ "$PKG_MANAGER" == "yum" || "$PKG_MANAGER" == "dnf" ]]; then
+                    mapped_packages+=("bind-utils")
+                elif [[ "$PKG_MANAGER" == "pacman" ]]; then
+                    mapped_packages+=("bind")
+                else
+                    mapped_packages+=("$pkg")
+                fi
+                ;;
+            "net-tools")
+                mapped_packages+=("$pkg")
+                ;;
+            *)
+                mapped_packages+=("$pkg")
+                ;;
+        esac
+    done
+
+    # Remove duplicates
+    local unique_packages=($(printf "%s\n" "${mapped_packages[@]}" | sort -u))
+
+    log_info "Installing packages: ${unique_packages[*]}"
+
+    if [[ "$PKG_MANAGER" == "apt" ]]; then
+        export DEBIAN_FRONTEND=noninteractive
+    fi
+
+    eval "$PKG_INSTALL ${unique_packages[*]}"
+}
+
 # Check if a service is running
 service_running() {
     systemctl is-active --quiet "$1"
@@ -159,9 +278,29 @@ check_resources() {
 # Install package if not present
 ensure_package() {
     local package=$1
-    if ! dpkg -l "$package" 2>/dev/null | grep -q "^ii"; then
-        apt-get install -y "$package"
+
+    if [[ -z "$PKG_MANAGER" ]]; then
+        detect_os || return 1
     fi
+
+    # Check if package is already installed based on package manager
+    case "$PKG_MANAGER" in
+        apt)
+            if ! dpkg -l "$package" 2>/dev/null | grep -q "^ii"; then
+                install_packages "$package"
+            fi
+            ;;
+        yum|dnf)
+            if ! rpm -q "$package" &>/dev/null; then
+                install_packages "$package"
+            fi
+            ;;
+        pacman)
+            if ! pacman -Q "$package" &>/dev/null; then
+                install_packages "$package"
+            fi
+            ;;
+    esac
 }
 
 # Create directory with proper ownership
