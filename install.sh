@@ -88,20 +88,14 @@ check_root() {
 }
 
 check_os() {
-    if [[ -f /etc/os-release ]]; then
-        source /etc/os-release
-        OS=$ID
-        OS_VERSION=$VERSION_ID
-        log_info "Detected OS: ${OS} ${OS_VERSION}"
-    else
-        log_error "Cannot detect OS. This script supports Debian/Ubuntu."
+    # Detect OS and set up package manager
+    if ! detect_os; then
+        log_error "Failed to detect operating system."
+        log_info "Supported: Debian, Ubuntu, CentOS, RHEL, Fedora, Rocky Linux, AlmaLinux, Arch, Manjaro"
         exit 1
     fi
-    
-    if [[ "$OS" != "debian" && "$OS" != "ubuntu" ]]; then
-        log_error "This script only supports Debian and Ubuntu."
-        exit 1
-    fi
+
+    log_success "Operating system check passed."
 }
 
 check_dns_record() {
@@ -380,11 +374,12 @@ load_config() {
 
 step_install_packages() {
     log_step "Installing essential packages..."
-    
-    export DEBIAN_FRONTEND=noninteractive
-    
-    apt-get update -y
-    apt-get install -y \
+
+    # Update package cache
+    update_packages
+
+    # Install packages (package name mapping is handled automatically)
+    install_packages \
         git \
         zsh \
         wget \
@@ -406,7 +401,7 @@ step_install_packages() {
         nginx \
         jq \
         openssl
-    
+
     log_success "Essential packages installed."
 }
 
@@ -723,22 +718,43 @@ EOF
 
 step_setup_nginx() {
     log_step "Setting up Nginx on port 80..."
-    
+
     # Backup original config
     cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak
-    
+
     # Change nginx user to xray user
     sed -i "s/^user .*/user ${XRAY_USER};/" /etc/nginx/nginx.conf
-    
+
     # Create webroot directory for ACME challenge
     mkdir -p "${WEB_DIR}/.well-known/acme-challenge"
     chown -R "${XRAY_USER}:${XRAY_USER}" "${WEB_DIR}"
-    
+
+    # Determine nginx config paths based on OS
+    local NGINX_CONFIG_FILE
+    local NGINX_SYMLINK_NEEDED=false
+
+    case "$OS" in
+        ubuntu|debian)
+            NGINX_CONFIG_FILE="/etc/nginx/sites-available/xray"
+            NGINX_SYMLINK_NEEDED=true
+            ;;
+        centos|rhel|fedora|rocky|almalinux|arch|manjaro)
+            NGINX_CONFIG_FILE="/etc/nginx/conf.d/xray.conf"
+            # Remove default.conf if it exists
+            rm -f /etc/nginx/conf.d/default.conf
+            ;;
+        *)
+            NGINX_CONFIG_FILE="/etc/nginx/conf.d/xray.conf"
+            ;;
+    esac
+
+    log_info "Using nginx config: ${NGINX_CONFIG_FILE}"
+
     # REALITY mode: minimal nginx (just HTTP redirect)
     if [[ "$SECURITY_MODE" == "reality" ]]; then
         log_info "REALITY mode: Setting up minimal Nginx..."
-        
-        cat > /etc/nginx/sites-available/xray << EOF
+
+        cat > "${NGINX_CONFIG_FILE}" << EOF
 # HTTP redirect only (REALITY mode)
 server {
     listen 80 default_server;
@@ -751,8 +767,8 @@ EOF
         # TLS mode: Setup HTTP server for ACME verification + Hacker News reverse proxy
         # This will be updated later to add HTTPS fallback after certificate is obtained
         log_info "TLS mode: Setting up HTTP server for certificate verification..."
-        
-        cat > /etc/nginx/sites-available/xray << EOF
+
+        cat > "${NGINX_CONFIG_FILE}" << EOF
 # HTTP server on port 80
 # Purpose: 
 #   1. ACME challenge for certificate issuance/renewal
@@ -782,11 +798,14 @@ server {
 }
 EOF
     fi
-    
-    # Enable the site
-    rm -f /etc/nginx/sites-enabled/default
-    ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
-    
+
+    # Enable the site (Debian/Ubuntu only)
+    if [[ "$NGINX_SYMLINK_NEEDED" == "true" ]]; then
+        rm -f /etc/nginx/sites-enabled/default
+        ln -sf /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray
+        log_info "Symlink created for nginx site configuration."
+    fi
+
     # Test nginx configuration
     if ! nginx -t; then
         log_error "Nginx configuration test failed!"
@@ -814,11 +833,25 @@ step_update_nginx_ssl() {
         log_info "REALITY mode - skipping nginx SSL update."
         return 0
     fi
-    
+
     log_step "Updating Nginx with SSL fallback configuration..."
-    
+
+    # Determine nginx config path based on OS
+    local NGINX_CONFIG_FILE
+    case "$OS" in
+        ubuntu|debian)
+            NGINX_CONFIG_FILE="/etc/nginx/sites-available/xray"
+            ;;
+        centos|rhel|fedora|rocky|almalinux|arch|manjaro)
+            NGINX_CONFIG_FILE="/etc/nginx/conf.d/xray.conf"
+            ;;
+        *)
+            NGINX_CONFIG_FILE="/etc/nginx/conf.d/xray.conf"
+            ;;
+    esac
+
     # Now add the SSL fallback server block for Xray
-    cat > /etc/nginx/sites-available/xray << EOF
+    cat > "${NGINX_CONFIG_FILE}" << EOF
 # HTTP server on port 80
 # Purpose: ACME challenge + redirect to HTTPS
 server {

@@ -52,25 +52,26 @@ check_user_exists() {
 
 install_acme() {
     log_info "Installing acme.sh for user ${XRAY_USER}..."
-    
+
     check_user_exists
-    
+
     # Create certs directory
     mkdir -p "${CERTS_DIR}"
     chown "${XRAY_USER}:${XRAY_USER}" "${CERTS_DIR}"
-    
-    # Install dependencies
-    apt-get update
-    apt-get install -y curl socat
-    
+
+    # Detect OS and install dependencies
+    detect_os || exit 1
+    update_packages
+    install_packages curl socat
+
     # Install acme.sh as the xray user
     local email_opt=""
     if [[ -n "$EMAIL" ]]; then
         email_opt="email=${EMAIL}"
     fi
-    
+
     sudo -u "$XRAY_USER" -H bash -c "curl https://get.acme.sh | sh -s ${email_opt}"
-    
+
     log_success "acme.sh installed successfully"
 }
 

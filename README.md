@@ -32,7 +32,7 @@ You need a VPS (Virtual Private Server) to install Xray.
 **Requirements:**
 
 - At least 512MB RAM (1GB recommended)
-- Ubuntu 20.04+ or Debian 10+
+- Any supported Linux distribution (Ubuntu, Debian, CentOS, RHEL, Rocky, AlmaLinux, Fedora, Arch, or Manjaro)
 - Ports 80 and 443 accessible
 
 **Typical Cost:** $3-10/month for basic VPS
@@ -70,10 +70,30 @@ You need a VPS (Virtual Private Server) to install Xray.
 
 ## Requirements
 
-- **OS**: Debian 10+ or Ubuntu 20.04+
+- **OS**: See supported operating systems below
 - **Access**: Root or sudo privileges
 - **Ports**: 80 and 443 must be available
 - **Domain**: Required for TLS mode (see warning above)
+
+## Supported Operating Systems
+
+This installer now supports multiple Linux distributions:
+
+| Distribution | Versions Tested | Package Manager | Status |
+|--------------|----------------|-----------------|--------|
+| **Ubuntu** | 20.04+, 22.04, 24.04 | apt | ✅ Fully Supported |
+| **Debian** | 10+, 11, 12 | apt | ✅ Fully Supported |
+| **CentOS** | 7, 8, Stream | yum/dnf | ✅ Fully Supported |
+| **RHEL** | 7, 8, 9 | yum/dnf | ✅ Fully Supported |
+| **Rocky Linux** | 8, 9 | dnf | ✅ Fully Supported |
+| **AlmaLinux** | 8, 9 | dnf | ✅ Fully Supported |
+| **Fedora** | 36+ | dnf | ✅ Fully Supported |
+| **Arch Linux** | Latest | pacman | ✅ Supported* |
+| **Manjaro** | Latest | pacman | ✅ Supported* |
+
+*Note: Cloudflare WARP is not officially available on Arch Linux. You'll need to use AUR (`yay -S cloudflare-warp-bin`) or alternative residential proxy configuration.
+
+The installer automatically detects your operating system and uses the appropriate package manager.
 
 ## What Gets Installed
 

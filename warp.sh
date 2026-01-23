@@ -13,17 +13,16 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-log_info() { echo -e "${CYAN}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+# Load libraries
+source "${SCRIPT_DIR}/lib/colors.sh" 2>/dev/null || {
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+}
+source "${SCRIPT_DIR}/lib/utils.sh" 2>/dev/null || {
+    log_info() { echo -e "${CYAN}[INFO]${NC} $1"; }
+    log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+    log_warn() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+    log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+}
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -32,40 +31,67 @@ check_root() {
     fi
 }
 
-detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        source /etc/os-release
-        OS=$ID
-        OS_VERSION=$VERSION_ID
-        OS_CODENAME=$(lsb_release -cs 2>/dev/null || echo "")
-    else
-        log_error "Cannot detect OS"
-        exit 1
-    fi
-}
-
 install_warp() {
     log_info "Installing Cloudflare WARP..."
-    
-    detect_os
-    
-    # Add Cloudflare repository
-    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-    
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${OS_CODENAME} main" | tee /etc/apt/sources.list.d/cloudflare-client.list
-    
-    apt-get update
-    apt-get install -y cloudflare-warp
-    
+
+    # Detect OS if not already detected
+    if [[ -z "$OS" ]]; then
+        detect_os || exit 1
+    fi
+
+    case "$OS" in
+        ubuntu|debian)
+            # Get OS codename
+            local OS_CODENAME=$(lsb_release -cs 2>/dev/null || echo "")
+            if [[ -z "$OS_CODENAME" ]]; then
+                log_error "Cannot detect OS codename. Please install lsb-release."
+                exit 1
+            fi
+
+            log_info "Installing WARP for Debian/Ubuntu..."
+
+            # Add Cloudflare repository
+            curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+
+            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${OS_CODENAME} main" | tee /etc/apt/sources.list.d/cloudflare-client.list
+
+            update_packages
+            install_packages cloudflare-warp
+            ;;
+
+        centos|rhel|fedora|rocky|almalinux)
+            log_info "Installing WARP for RHEL/CentOS/Fedora..."
+
+            # Add Cloudflare repository
+            curl -fsSL https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo | tee /etc/yum.repos.d/cloudflare-warp.repo
+
+            update_packages
+            install_packages cloudflare-warp
+            ;;
+
+        arch|manjaro)
+            log_warn "WARP is not officially supported on Arch Linux."
+            log_info "You can try installing from AUR: yay -S cloudflare-warp-bin"
+            log_info "Or use an alternative like WireGuard with WARP config."
+            exit 1
+            ;;
+
+        *)
+            log_error "WARP installation not supported on: $OS"
+            log_info "Supported: Debian, Ubuntu, CentOS, RHEL, Fedora, Rocky Linux, AlmaLinux"
+            exit 1
+            ;;
+    esac
+
     log_success "WARP installed."
-    
+
     # Register
     log_info "Registering WARP..."
     warp-cli register
-    
+
     # Set to proxy mode (doesn't take over all traffic)
     warp-cli set-mode proxy
-    
+
     log_success "WARP registered and set to proxy mode."
 }
 
@@ -153,16 +179,34 @@ status_warp() {
 
 remove_warp() {
     log_warn "Removing WARP..."
-    
+
     warp-cli disconnect 2>/dev/null || true
     warp-cli delete 2>/dev/null || true
-    
-    apt-get remove -y cloudflare-warp
-    apt-get autoremove -y
-    
-    rm -f /etc/apt/sources.list.d/cloudflare-client.list
-    rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-    
+
+    # Detect OS if not already detected
+    if [[ -z "$OS" ]]; then
+        detect_os || exit 1
+    fi
+
+    case "$OS" in
+        ubuntu|debian)
+            eval "$PKG_INSTALL" remove -y cloudflare-warp
+            eval "$PKG_INSTALL" autoremove -y
+            rm -f /etc/apt/sources.list.d/cloudflare-client.list
+            rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+            ;;
+
+        centos|rhel|fedora|rocky|almalinux)
+            eval "$PKG_MANAGER" remove -y cloudflare-warp
+            rm -f /etc/yum.repos.d/cloudflare-warp.repo
+            ;;
+
+        *)
+            log_error "WARP removal not supported on: $OS"
+            exit 1
+            ;;
+    esac
+
     log_success "WARP removed."
 }
 
