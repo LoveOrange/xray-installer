@@ -594,8 +594,10 @@ step_request_certificate() {
             -w ${WEB_DIR} \
             --keylength ec-256
     "
-    
-    if [[ $? -ne 0 ]]; then
+    local staging_exit_code=$?
+
+    # acme.sh exit codes: 0=success, 2=certificate still valid (skip), others=error
+    if [[ $staging_exit_code -ne 0 ]] && [[ $staging_exit_code -ne 2 ]]; then
         echo ""
         log_error "Certificate test failed!"
         echo ""
@@ -608,6 +610,10 @@ step_request_certificate() {
         echo "  sudo -u ${XRAY_USER} ${XRAY_HOME}/.acme.sh/acme.sh --issue --server letsencrypt_test -d ${DOMAIN} -w ${WEB_DIR} --keylength ec-256 --debug"
         echo ""
         exit 1
+    fi
+
+    if [[ $staging_exit_code -eq 2 ]]; then
+        log_info "Staging certificate already exists and is valid, continuing..."
     fi
     
     log_success "Test certificate issued successfully!"
@@ -622,13 +628,19 @@ step_request_certificate() {
             --keylength ec-256 \
             --force
     "
-    
-    if [[ $? -ne 0 ]]; then
+    local issue_exit_code=$?
+
+    # acme.sh exit codes: 0=success, 2=certificate still valid (skip), others=error
+    if [[ $issue_exit_code -ne 0 ]] && [[ $issue_exit_code -ne 2 ]]; then
         log_error "Certificate issuance failed!"
         exit 1
     fi
-    
-    log_success "Certificate issued successfully!"
+
+    if [[ $issue_exit_code -eq 2 ]]; then
+        log_info "Certificate already exists and is valid, skipping issuance..."
+    else
+        log_success "Certificate issued successfully!"
+    fi
     
     # Step 3: Install certificate to our directory
     log_info "Installing certificate to ${CERTS_DIR}..."
@@ -638,7 +650,19 @@ step_request_certificate() {
             --fullchain-file ${CERTS_DIR}/xray.crt \
             --key-file ${CERTS_DIR}/xray.key
     "
-    
+
+    if [[ $? -ne 0 ]]; then
+        log_error "Certificate installation failed!"
+        exit 1
+    fi
+
+    # Verify certificate files exist
+    if [[ ! -f "${CERTS_DIR}/xray.crt" ]] || [[ ! -f "${CERTS_DIR}/xray.key" ]]; then
+        log_error "Certificate files not found after installation!"
+        log_error "Expected: ${CERTS_DIR}/xray.crt and ${CERTS_DIR}/xray.key"
+        exit 1
+    fi
+
     # Set proper permissions (readable by xray service)
     chmod 644 "${CERTS_DIR}/xray.crt"
     chmod 644 "${CERTS_DIR}/xray.key"

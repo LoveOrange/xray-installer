@@ -105,14 +105,25 @@ issue_certificate() {
             --key-file ${CERTS_DIR}/xray.key \
             --reloadcmd 'sudo systemctl restart xray 2>/dev/null || true'
     "
-    
+
+    if [[ $? -ne 0 ]]; then
+        log_error "Certificate installation failed!"
+        exit 1
+    fi
+
+    # Verify certificate files exist
+    if [[ ! -f "${CERTS_DIR}/xray.crt" ]] || [[ ! -f "${CERTS_DIR}/xray.key" ]]; then
+        log_error "Certificate files not found after installation!"
+        exit 1
+    fi
+
     # Set permissions
     chmod 644 "${CERTS_DIR}/xray.crt"
     chmod 644 "${CERTS_DIR}/xray.key"
-    
+
     # Restart nginx
     systemctl start nginx 2>/dev/null || true
-    
+
     log_success "Certificate issued and installed to ${CERTS_DIR}"
 }
 
@@ -144,11 +155,22 @@ issue_certificate_webroot() {
             --key-file ${CERTS_DIR}/xray.key \
             --reloadcmd 'sudo systemctl restart xray 2>/dev/null || true'
     "
-    
+
+    if [[ $? -ne 0 ]]; then
+        log_error "Certificate installation failed!"
+        exit 1
+    fi
+
+    # Verify certificate files exist
+    if [[ ! -f "${CERTS_DIR}/xray.crt" ]] || [[ ! -f "${CERTS_DIR}/xray.key" ]]; then
+        log_error "Certificate files not found after installation!"
+        exit 1
+    fi
+
     # Set permissions
     chmod 644 "${CERTS_DIR}/xray.crt"
     chmod 644 "${CERTS_DIR}/xray.key"
-    
+
     log_success "Certificate issued and installed to ${CERTS_DIR}"
 }
 
