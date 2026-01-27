@@ -740,6 +740,75 @@ EOF
     log_success "Certificate auto-renewal configured."
 }
 
+check_port_conflicts() {
+    log_step "Checking for port conflicts..."
+
+    local port=80
+
+    if port_in_use $port; then
+        log_warn "Port $port is currently in use."
+
+        # Try to identify the process
+        local process_name=""
+
+        if command_exists lsof; then
+            # -t: terse (PID only), -i: inet, -sTCP:LISTEN
+            # ps -p <PID> -o comm= gets the command name
+            local pids=$(lsof -i :$port -sTCP:LISTEN -t)
+            if [[ -n "$pids" ]]; then
+                process_name=$(ps -p $pids -o comm= | head -n1)
+            fi
+        elif command_exists netstat; then
+            process_name=$(netstat -nlp | grep :$port | grep LISTEN | awk '{print $7}' | cut -d'/' -f2 | head -n1)
+        else
+            # ss output format: users:(("nginx",pid=123,fd=6))
+            process_name=$(ss -lptn "sport = :$port" | grep -o 'users:(("[^"]*"' | cut -d'"' -f2 | head -n1)
+        fi
+
+        if [[ -n "$process_name" ]]; then
+            log_info "Process identified: $process_name"
+
+            if [[ "$process_name" == "nginx" ]]; then
+                log_info "Port 80 is used by nginx. This is expected and will be reconfigured."
+                return 0
+            else
+                log_error "Port 80 is occupied by '$process_name'!"
+                echo -e "${YELLOW}This will conflict with the installation.${NC}"
+                read -p "Do you want to attempt to stop this service? [y/N]: " stop_service
+
+                if [[ "${stop_service,,}" == "y" ]]; then
+                    log_info "Attempting to stop $process_name..."
+                    if systemctl stop "$process_name" 2>/dev/null; then
+                        log_success "Service stopped."
+                    else
+                        # Try killing by PID
+                        local pids=$(lsof -t -i:$port 2>/dev/null || ss -lptn "sport = :$port" | grep -o 'pid=[0-9]*' | cut -d= -f2)
+                        if [[ -n "$pids" ]]; then
+                             kill $pids
+                             log_success "Process killed."
+                        else
+                             log_error "Failed to stop service. Please free port 80 manually."
+                             exit 1
+                        fi
+                    fi
+                else
+                    log_error "Installation aborted. Please free port 80 manually."
+                    exit 1
+                fi
+            fi
+        else
+            log_warn "Could not identify process using port 80."
+            log_warn "Please ensure port 80 is free or used by Nginx."
+            read -p "Continue anyway? [y/N]: " continue_anyway
+            if [[ "${continue_anyway,,}" != "y" ]]; then
+                exit 1
+            fi
+        fi
+    else
+        log_success "Port 80 is free."
+    fi
+}
+
 step_setup_nginx() {
     log_step "Setting up Nginx on port 80..."
 
@@ -1645,6 +1714,7 @@ main() {
     step_create_user
     step_setup_bbr
     step_install_acme
+    check_port_conflicts     # Check port 80 availability
     step_setup_nginx         # Setup nginx on port 80 FIRST
     step_request_certificate # Then request cert using webroot
     step_update_nginx_ssl    # Update nginx config for SSL
