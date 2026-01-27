@@ -92,21 +92,29 @@ issue_certificate() {
     systemctl stop nginx 2>/dev/null || true
     
     # Issue certificate using standalone mode
+    # acme.sh exit codes: 0=success, 2=certificate still valid (skip), others=error
+    local issue_exit_code=0
     sudo -u "$XRAY_USER" -H bash -c "
         export HOME='${XRAY_HOME}'
         ~/.acme.sh/acme.sh --issue -d ${domain} --standalone --keylength ec-256
-    "
-    
+    " || issue_exit_code=$?
+
+    if [[ $issue_exit_code -ne 0 ]] && [[ $issue_exit_code -ne 2 ]]; then
+        log_error "Certificate issuance failed!"
+        exit 1
+    fi
+
     # Install certificate
+    local install_exit_code=0
     sudo -u "$XRAY_USER" -H bash -c "
         export HOME='${XRAY_HOME}'
         ~/.acme.sh/acme.sh --install-cert -d ${domain} --ecc \
             --fullchain-file ${CERTS_DIR}/xray.crt \
             --key-file ${CERTS_DIR}/xray.key \
             --reloadcmd 'sudo systemctl restart xray 2>/dev/null || true'
-    "
+    " || install_exit_code=$?
 
-    if [[ $? -ne 0 ]]; then
+    if [[ $install_exit_code -ne 0 ]]; then
         log_error "Certificate installation failed!"
         exit 1
     fi
@@ -142,21 +150,29 @@ issue_certificate_webroot() {
     check_user_exists
     
     # Issue certificate using webroot mode
+    # acme.sh exit codes: 0=success, 2=certificate still valid (skip), others=error
+    local issue_exit_code=0
     sudo -u "$XRAY_USER" -H bash -c "
         export HOME='${XRAY_HOME}'
         ~/.acme.sh/acme.sh --issue -d ${domain} -w ${webroot} --keylength ec-256
-    "
-    
+    " || issue_exit_code=$?
+
+    if [[ $issue_exit_code -ne 0 ]] && [[ $issue_exit_code -ne 2 ]]; then
+        log_error "Certificate issuance failed!"
+        exit 1
+    fi
+
     # Install certificate
+    local install_exit_code=0
     sudo -u "$XRAY_USER" -H bash -c "
         export HOME='${XRAY_HOME}'
         ~/.acme.sh/acme.sh --install-cert -d ${domain} --ecc \
             --fullchain-file ${CERTS_DIR}/xray.crt \
             --key-file ${CERTS_DIR}/xray.key \
             --reloadcmd 'sudo systemctl restart xray 2>/dev/null || true'
-    "
+    " || install_exit_code=$?
 
-    if [[ $? -ne 0 ]]; then
+    if [[ $install_exit_code -ne 0 ]]; then
         log_error "Certificate installation failed!"
         exit 1
     fi
