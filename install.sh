@@ -587,14 +587,14 @@ step_request_certificate() {
     # Based on: https://xtls.github.io/document/level-0/ch06-certificates.html
     log_info "Testing certificate issuance (staging server)..."
     
+    local staging_exit_code=0
     sudo -u "$XRAY_USER" -H bash -c "
         ${XRAY_HOME}/.acme.sh/acme.sh --issue \
             --server letsencrypt_test \
             -d ${DOMAIN} \
             -w ${WEB_DIR} \
             --keylength ec-256
-    "
-    local staging_exit_code=$?
+    " || staging_exit_code=$?
 
     # acme.sh exit codes: 0=success, 2=certificate still valid (skip), others=error
     if [[ $staging_exit_code -ne 0 ]] && [[ $staging_exit_code -ne 2 ]]; then
@@ -621,14 +621,14 @@ step_request_certificate() {
     # Step 2: Request real certificate
     log_info "Requesting real certificate from Let's Encrypt..."
     
+    local issue_exit_code=0
     sudo -u "$XRAY_USER" -H bash -c "
         ${XRAY_HOME}/.acme.sh/acme.sh --issue \
             -d ${DOMAIN} \
             -w ${WEB_DIR} \
             --keylength ec-256 \
             --force
-    "
-    local issue_exit_code=$?
+    " || issue_exit_code=$?
 
     # acme.sh exit codes: 0=success, 2=certificate still valid (skip), others=error
     if [[ $issue_exit_code -ne 0 ]] && [[ $issue_exit_code -ne 2 ]]; then
@@ -645,13 +645,14 @@ step_request_certificate() {
     # Step 3: Install certificate to our directory
     log_info "Installing certificate to ${CERTS_DIR}..."
     
+    local install_exit_code=0
     sudo -u "$XRAY_USER" -H bash -c "
         ${XRAY_HOME}/.acme.sh/acme.sh --install-cert -d ${DOMAIN} --ecc \
             --fullchain-file ${CERTS_DIR}/xray.crt \
             --key-file ${CERTS_DIR}/xray.key
-    "
+    " || install_exit_code=$?
 
-    if [[ $? -ne 0 ]]; then
+    if [[ $install_exit_code -ne 0 ]]; then
         log_error "Certificate installation failed!"
         exit 1
     fi
