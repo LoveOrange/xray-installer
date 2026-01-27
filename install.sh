@@ -638,7 +638,19 @@ step_request_certificate() {
             --fullchain-file ${CERTS_DIR}/xray.crt \
             --key-file ${CERTS_DIR}/xray.key
     "
-    
+
+    if [[ $? -ne 0 ]]; then
+        log_error "Certificate installation failed!"
+        exit 1
+    fi
+
+    # Verify certificate files exist
+    if [[ ! -f "${CERTS_DIR}/xray.crt" ]] || [[ ! -f "${CERTS_DIR}/xray.key" ]]; then
+        log_error "Certificate files not found after installation!"
+        log_error "Expected: ${CERTS_DIR}/xray.crt and ${CERTS_DIR}/xray.key"
+        exit 1
+    fi
+
     # Set proper permissions (readable by xray service)
     chmod 644 "${CERTS_DIR}/xray.crt"
     chmod 644 "${CERTS_DIR}/xray.key"
